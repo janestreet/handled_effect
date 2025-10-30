@@ -1,9 +1,14 @@
+include Effect_intf
+
 module Obj = struct
   include Stdlib.Obj
   include Basement.Stdlib_shim.Obj
+
+  external magic_at_unique : 'a -> 'b = "%identity"
+  external magic_portable_at_unique : 'a -> 'a = "%identity"
 end
 
-module Modes = Basement.Stdlib_shim.Modes
+module Modes = Base.Modes
 
 module Handler_index : sig
   (** [(es1, es2) t] represents an index into the effect list [es2]. [es1] is the tail
@@ -99,34 +104,9 @@ module Handler : sig
   (** Heap-allocated handler. *)
   type 'e t = { h : 'e t' } [@@unboxed]
 
+  include Handler with type 'e t := 'e t
+
   type _ t' += Dummy : 'a t'
-
-  module List : sig
-    type 'e handler := 'e t
-
-    type 'es t =
-      | [] : unit t
-      | ( :: ) : 'e handler * 'es t -> ('e * 'es) t
-      (** [es t] is a list of handlers for effects [es]. *)
-
-    module Length : sig
-      type x = X (** [x] is the type of [X]s *)
-
-      type 'es t =
-        | [] : unit t
-        | ( :: ) : x * 'es t -> ('e * 'es) t
-        (** [es t] is the length of effect list [es]. It has slightly unusual constructors
-            so that lengths can be written as [[X;X;X]] rather than e.g. [(S (S (S Z)))].
-            This looks nicer on calls to [fiber_with]:
-
-            {[
-              fiber_with [X; X; X] (fun [a; b; c] -> ...)
-            ]} *)
-    end
-
-    (** [length t] is the length of [t]. *)
-    val length : 'es t -> 'es Length.t
-  end
 
   module type Create = sig
     type e
@@ -315,6 +295,8 @@ end
 type ('a, 'e) op
 type ('a, 'e) perform = ('a, 'e) op * 'e Handler.t'
 
+(* [perform_] is able to return a unique value because [continue] is required
+   to provide a unique value. *)
 external perform_ : ('a, 'e) perform -> 'a = "%perform"
 
 (* A last_fiber is a tagged pointer, so does not keep the fiber alive.
@@ -361,10 +343,13 @@ module Must_not_enter_gc = struct
 
   external resume : ('a, 'b) stack -> ('c -> 'a) -> 'c -> last_fiber -> 'b = "%resume"
 
+  let is_runtime5 () = Basement.Stdlib_shim.runtime5 ()
+
   (* Allocate a stack and immediately run [f x] using that stack.
      We must not enter the GC between [alloc_stack] and [runstack].
      [with_stack] is marked as [@inline never] to avoid reordering. *)
   let[@inline never] with_stack valuec exnc effc f x =
+    if not (is_runtime5 ()) then failwith "Effects require the OCaml 5 runtime.";
     runstack (alloc_stack valuec exnc effc) f x
   ;;
 
@@ -372,6 +357,7 @@ module Must_not_enter_gc = struct
      We must not enter the GC between [take_cont_noexc] and [resume].
      [with_cont] is marked as [@inline never] to avoid reordering. *)
   let[@inline never] with_cont cont f x =
+    if not (is_runtime5 ()) then failwith "Effects require the OCaml 5 runtime.";
     let fiber, cont = borrow (fun k -> cont_last_fiber k) cont in
     resume (take_cont_noexc cont) f x fiber
   ;;
@@ -549,22 +535,20 @@ module DRF : sig
     -> ('a, 'b, 'e, 'es) continuation
 
   val run : ('e Handler.t -> 'a) -> ('a, 'e, unit) res
-  (* Returns a [res] to be [Obj.magic]ed into the contended result type with [op @@ contended]. *)
 
   val run_with
     :  'es Handler.List.t
     -> (('e * 'es) Handler.List.t -> 'a)
     -> ('a, 'e, 'es) res
-  (* Returns a [res] to be [Obj.magic]ed into the contended result type with [op @@ contended]. *)
 end = struct
   let[@inline] fiber f =
-    let f h a = f (Obj.magic_portable h) (Obj.magic_portable a) [@nontail] in
+    let f h a = f (Obj.magic_portable h) (Obj.magic_portable_at_unique a) [@nontail] in
     let k : ('a, 'b, 'e, unit) continuation = Obj.magic_at_unique (fiber f) in
     k
   ;;
 
   let[@inline] fiber_with hs f =
-    let f hs a = f (Obj.magic_portable hs) (Obj.magic_portable a) [@nontail] in
+    let f hs a = f (Obj.magic_portable hs) (Obj.magic_portable_at_unique a) [@nontail] in
     let k : ('a, 'b, 'e, 'es) continuation = Obj.magic_at_unique (fiber_with hs f) in
     k
   ;;
@@ -614,296 +598,7 @@ let discontinue_with_backtrace (type a b es) (k : (a, b, es) Continuation.t) e b
   (Obj.magic_at_unique res : b)
 ;;
 
-module type S = sig
-  type ('o, 'e) ops
-  type t
-
-  module Result : sig
-    type eff := t
-
-    type ('a, 'es) t =
-      | Value : 'a -> ('a, 'es) t
-      | Exception : exn -> ('a, 'es) t
-      | Operation : ('o, eff) ops * ('o, ('a, 'es) t, 'es) Continuation.t -> ('a, 'es) t
-
-    type ('a, 'es) handler =
-      { handle : 'o. ('o, eff) ops -> ('o, ('a, 'es) t, 'es) Continuation.t -> 'a }
-    [@@unboxed]
-
-    val handle : ('a, 'es) t -> ('a, 'es) handler -> 'a
-  end
-
-  type ('a, 'es) result = ('a, 'es) Result.t =
-    | Value : 'a -> ('a, 'es) result
-    | Exception : exn -> ('a, 'es) result
-    | Operation :
-        ('o, t) ops * ('o, ('a, 'es) result, 'es) Continuation.t
-        -> ('a, 'es) result
-
-  val fiber : (t Handler.t -> 'a -> 'b) -> ('a, ('b, unit) Result.t, unit) Continuation.t
-
-  val fiber_with
-    :  'es Handler.List.Length.t
-    -> ((t * 'es) Handler.List.t -> 'a -> 'b)
-    -> ('a, ('b, 'es) Result.t, 'es) Continuation.t
-
-  val run : (t Handler.t -> 'a) -> ('a, unit) Result.t
-
-  val run_with
-    :  'es Handler.List.t
-    -> ((t * 'es) Handler.List.t -> 'a)
-    -> ('a, 'es) Result.t
-
-  val perform : t Handler.t -> ('a, t) ops -> 'a
-
-  module Contended : sig
-    module Result : sig
-      type eff := t
-
-      type ('a, 'es) t =
-        | Value : 'a -> ('a, 'es) t
-        | Exception : exn -> ('a, 'es) t
-        | Operation :
-            ('o, eff) ops * ('o Modes.Portable.t, ('a, 'es) t, 'es) Continuation.t
-            -> ('a, 'es) t
-    end
-
-    val fiber
-      : 'a 'b.
-      (t Handler.t -> 'a -> 'b) -> ('a, ('b, unit) Result.t, unit) Continuation.t
-
-    val fiber_with
-      : 'a 'b 'es.
-      'es Handler.List.Length.t
-      -> ((t * 'es) Handler.List.t -> 'a -> 'b)
-      -> ('a, ('b, 'es) Result.t, 'es) Continuation.t
-
-    val run : (t Handler.t -> 'a) -> ('a, unit) Result.t
-
-    val run_with
-      :  'es Handler.List.t
-      -> ((t * 'es) Handler.List.t -> 'a)
-      -> ('a, 'es) Result.t
-
-    val perform : t Handler.t -> ('a, t) ops -> 'a
-  end
-
-  module Handler : sig
-    type nonrec t = t Handler.t
-  end
-
-  module Continuation : sig
-    type ('a, 'b, 'es) t = ('a, ('b, 'es) Result.t, 'es) Continuation.t
-  end
-end
-
-module type S1 = sig
-  type ('o, 'p, 'e) ops
-  type 'p t
-
-  module Result : sig
-    type 'p eff := 'p t
-
-    type ('a, 'p, 'es) t =
-      | Value : 'a -> ('a, 'p, 'es) t
-      | Exception : exn -> ('a, 'p, 'es) t
-      | Operation :
-          ('o, 'p, 'p eff) ops * ('o, ('a, 'p, 'es) t, 'es) Continuation.t
-          -> ('a, 'p, 'es) t
-
-    type ('a, 'p, 'es) handler =
-      { handle :
-          'o. ('o, 'p, 'p eff) ops -> ('o, ('a, 'p, 'es) t, 'es) Continuation.t -> 'a
-      }
-    [@@unboxed]
-
-    val handle : ('a, 'p, 'es) t -> ('a, 'p, 'es) handler -> 'a
-  end
-
-  type ('a, 'p, 'es) result = ('a, 'p, 'es) Result.t =
-    | Value : 'a -> ('a, 'p, 'es) result
-    | Exception : exn -> ('a, 'p, 'es) result
-    | Operation :
-        ('o, 'p, 'p t) ops * ('o, ('a, 'p, 'es) result, 'es) Continuation.t
-        -> ('a, 'p, 'es) result
-
-  val fiber
-    :  ('p t Handler.t -> 'a -> 'b)
-    -> ('a, ('b, 'p, unit) Result.t, unit) Continuation.t
-
-  val fiber_with
-    :  'es Handler.List.Length.t
-    -> (('p t * 'es) Handler.List.t -> 'a -> 'b)
-    -> ('a, ('b, 'p, 'es) Result.t, 'es) Continuation.t
-
-  val run : ('p t Handler.t -> 'a) -> ('a, 'p, unit) Result.t
-
-  val run_with
-    :  'es Handler.List.t
-    -> (('p t * 'es) Handler.List.t -> 'a)
-    -> ('a, 'p, 'es) Result.t
-
-  val perform : 'p t Handler.t -> ('a, 'p, 'p t) ops -> 'a
-
-  module Contended : sig
-    module Result : sig
-      type 'p eff := 'p t
-
-      type ('a, 'p, 'es) t =
-        | Value : 'a -> ('a, 'p, 'es) t
-        | Exception : exn -> ('a, 'p, 'es) t
-        | Operation :
-            ('o, 'p, 'p eff) ops
-            * ('o Modes.Portable.t, ('a, 'p, 'es) t, 'es) Continuation.t
-            -> ('a, 'p, 'es) t
-    end
-
-    val fiber
-      : 'a 'b 'p.
-      ('p t Handler.t -> 'a -> 'b) -> ('a, ('b, 'p, unit) Result.t, unit) Continuation.t
-
-    val fiber_with
-      : 'a 'b 'p 'es.
-      'es Handler.List.Length.t
-      -> (('p t * 'es) Handler.List.t -> 'a -> 'b)
-      -> ('a, ('b, 'p, 'es) Result.t, 'es) Continuation.t
-
-    val run : ('p t Handler.t -> 'a) -> ('a, 'p, unit) Result.t
-
-    val run_with
-      :  'es Handler.List.t
-      -> (('p t * 'es) Handler.List.t -> 'a)
-      -> ('a, 'p, 'es) Result.t
-
-    val perform : 'p t Handler.t -> ('a, 'p, 'p t) ops -> 'a
-  end
-
-  module Handler : sig
-    type nonrec 'p t = 'p t Handler.t
-  end
-
-  module Continuation : sig
-    type ('a, 'b, 'p, 'es) t = ('a, ('b, 'p, 'es) Result.t, 'es) Continuation.t
-  end
-end
-
-module type S2 = sig
-  type ('o, 'p, 'q, 'e) ops
-  type ('p, 'q) t
-
-  module Result : sig
-    type ('p, 'q) eff := ('p, 'q) t
-
-    type ('a, 'p, 'q, 'es) t =
-      | Value : 'a -> ('a, 'p, 'q, 'es) t
-      | Exception : exn -> ('a, 'p, 'q, 'es) t
-      | Operation :
-          ('o, 'p, 'q, ('p, 'q) eff) ops * ('o, ('a, 'p, 'q, 'es) t, 'es) Continuation.t
-          -> ('a, 'p, 'q, 'es) t
-
-    type ('a, 'p, 'q, 'es) handler =
-      { handle :
-          'o.
-          ('o, 'p, 'q, ('p, 'q) eff) ops
-          -> ('o, ('a, 'p, 'q, 'es) t, 'es) Continuation.t
-          -> 'a
-      }
-    [@@unboxed]
-
-    val handle : ('a, 'p, 'q, 'es) t -> ('a, 'p, 'q, 'es) handler -> 'a
-  end
-
-  type ('a, 'p, 'q, 'es) result = ('a, 'p, 'q, 'es) Result.t =
-    | Value : 'a -> ('a, 'p, 'q, 'es) result
-    | Exception : exn -> ('a, 'p, 'q, 'es) result
-    | Operation :
-        ('o, 'p, 'q, ('p, 'q) t) ops * ('o, ('a, 'p, 'q, 'es) result, 'es) Continuation.t
-        -> ('a, 'p, 'q, 'es) result
-
-  val fiber
-    :  (('p, 'q) t Handler.t -> 'a -> 'b)
-    -> ('a, ('b, 'p, 'q, unit) result, unit) Continuation.t
-
-  val fiber_with
-    :  'es Handler.List.Length.t
-    -> ((('p, 'q) t * 'es) Handler.List.t -> 'a -> 'b)
-    -> ('a, ('b, 'p, 'q, 'es) result, 'es) Continuation.t
-
-  val run : (('p, 'q) t Handler.t -> 'a) -> ('a, 'p, 'q, unit) result
-
-  val run_with
-    :  'es Handler.List.t
-    -> ((('p, 'q) t * 'es) Handler.List.t -> 'a)
-    -> ('a, 'p, 'q, 'es) result
-
-  val perform : ('p, 'q) t Handler.t -> ('a, 'p, 'q, ('p, 'q) t) ops -> 'a
-
-  module Contended : sig
-    module Result : sig
-      type ('p, 'q) eff := ('p, 'q) t
-
-      type ('a, 'p, 'q, 'es) t =
-        | Value : 'a -> ('a, 'p, 'q, 'es) t
-        | Exception : exn -> ('a, 'p, 'q, 'es) t
-        | Operation :
-            ('o, 'p, 'q, ('p, 'q) eff) ops
-            * ('o Modes.Portable.t, ('a, 'p, 'q, 'es) t, 'es) Continuation.t
-            -> ('a, 'p, 'q, 'es) t
-    end
-
-    val fiber
-      : 'a 'b 'p 'q.
-      (('p, 'q) t Handler.t -> 'a -> 'b)
-      -> ('a, ('b, 'p, 'q, unit) Result.t, unit) Continuation.t
-
-    val fiber_with
-      : 'a 'b 'p 'q 'es.
-      'es Handler.List.Length.t
-      -> ((('p, 'q) t * 'es) Handler.List.t -> 'a -> 'b)
-      -> ('a, ('b, 'p, 'q, 'es) Result.t, 'es) Continuation.t
-
-    val run : (('p, 'q) t Handler.t -> 'a) -> ('a, 'p, 'q, unit) Result.t
-
-    val run_with
-      :  'es Handler.List.t
-      -> ((('p, 'q) t * 'es) Handler.List.t -> 'a)
-      -> ('a, 'p, 'q, 'es) Result.t
-
-    val perform : ('p, 'q) t Handler.t -> ('a, 'p, 'q, ('p, 'q) t) ops -> 'a
-  end
-
-  module Handler : sig
-    type nonrec ('p, 'q) t = ('p, 'q) t Handler.t
-  end
-
-  module Continuation : sig
-    type ('a, 'b, 'p, 'q, 'es) t = ('a, ('b, 'p, 'q, 'es) result, 'es) Continuation.t
-  end
-end
-
-module type Operations = sig
-  type 'a t
-end
-
-module type Operations_rec = sig
-  type ('a, 'e) t
-end
-
-module type Operations1 = sig
-  type ('a, 'p) t
-end
-
-module type Operations1_rec = sig
-  type ('a, 'p, 'e) t
-end
-
-module type Operations2 = sig
-  type ('a, 'p, 'q) t
-end
-
-module type Operations2_rec = sig
-  type ('a, 'p, 'q, 'e) t
-end
+include Effect_intf.Definitions (Handler) (Continuation)
 
 module Make_rec (Ops : Operations_rec) : S with type ('a, 'e) ops := ('a, 'e) Ops.t =
 struct
@@ -1208,11 +903,13 @@ type exn += Unhandled : 'e Handler.t -> exn
 
 (* Register the exceptions so that the runtime can access it *)
 let _ =
-  Callback.Safe.register_exception "Effect.Unhandled" (Unhandled { h = Handler.Dummy })
+  Basement.Stdlib_shim.Callback.Safe.register_exception
+    "Effect.Unhandled"
+    (Unhandled { h = Handler.Dummy })
 ;;
 
 let _ =
-  Callback.Safe.register_exception
+  Basement.Stdlib_shim.Callback.Safe.register_exception
     "Effect.Continuation_already_resumed"
     Continuation_already_resumed
 ;;
