@@ -83,38 +83,34 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
           ('o, t) ops @@ aliased global many * ('o, ('a, 'es) result, 'es) Continuation.t
           -> ('a, 'es) result
 
+    (** [fiber f] constructs a continuation that runs the computation [f]. [f] is passed a
+        [t Handler.t] so that it can perform operations from the effect [t]. *)
     val fiber
-      :  (local_ t Handler.t -> 'a @ once unique -> 'b) @ once
+      :  (t Handler.t @ local -> 'a @ once unique -> 'b) @ once
       -> ('a, ('b, unit) Result.t, unit) Continuation.t @ unique
-    [@@ocaml.doc
-      {| [fiber f] constructs a continuation that runs the computation [f]. [f] is passed
-          a [t Handler.t] so that it can perform operations from the effect [t]. |}]
 
+    (** [fiber_with l f] constructs a continuation that runs the computation [f] and
+        requires handlers for [l] additional effects. [f] is passed a typed list of
+        handlers so that it can perform operations from the effect [t] and the effects
+        ['es]. *)
     val fiber_with
-      :  local_ 'es Handler.List.Length.t
-      -> (local_ (t * 'es) Handler.List.t -> 'a @ once unique -> 'b) @ once
+      :  'es Handler.List.Length.t @ local
+      -> ((t * 'es) Handler.List.t @ local -> 'a @ once unique -> 'b) @ once
       -> ('a, ('b, 'es) Result.t, 'es) Continuation.t @ unique
-    [@@ocaml.doc
-      {| [fiber_with l f] constructs a continuation that runs the computation [f] and
-          requires handlers for [l] additional effects. [f] is passed a typed list of
-          handlers so that it can perform operations from the effect [t] and the effects
-          ['es]. |}]
 
-    val run : (local_ t Handler.t -> 'a) @ once -> ('a, unit) Result.t @ once unique
-    [@@ocaml.doc
-      {| [run f] constructs a continuation that runs the computation [f] and immediately
-          resumes it. [f] is passed a [t Handler.t] so that it can perform operations from
-          the effect [t]. |}]
+    (** [run f] constructs a continuation that runs the computation [f] and immediately
+        resumes it. [f] is passed a [t Handler.t] so that it can perform operations from
+        the effect [t]. *)
+    val run : (t Handler.t @ local -> 'a) @ once -> ('a, unit) Result.t @ once unique
 
+    (** [run_with hs f] constructs a continuation that runs the computation [f] and
+        immediately resumes it under the handlers [hs]. [f] is passed a typed list of
+        handlers so that it can perform operations from the effect [t] and the effects
+        ['es]. *)
     val run_with
-      :  local_ 'es Handler.List.t
-      -> (local_ (t * 'es) Handler.List.t -> 'a) @ once
+      :  'es Handler.List.t @ local
+      -> ((t * 'es) Handler.List.t @ local -> 'a) @ once
       -> ('a, 'es) Result.t @ once unique
-    [@@ocaml.doc
-      {| [run_with hs f] constructs a continuation that runs the computation [f] and
-          immediately resumes it under the handlers [hs]. [f] is passed a typed list of
-          handlers so that it can perform operations from the effect [t] and the effects
-          ['es]. |}]
 
     (** [perform h e] performs an effect [e] that will be handled by [h] *)
     val perform : t Handler.t @ local -> ('a, t) ops -> 'a @ once unique
@@ -132,40 +128,36 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
               -> ('a, 'es) t
       end
 
+      (** [fiber f] works as the non-contended version, but provides a [portable] handler
+          at the cost of requiring a [value mod portable] argument and returning a
+          [Contended.Result.t]. *)
       val fiber
         : ('a : value mod portable) 'b.
         (t Handler.t @ local portable -> 'a @ contended once unique -> 'b) @ once
         -> ('a, ('b, unit) Result.t, unit) Continuation.t @ unique
-      [@@ocaml.doc
-        {| [fiber f] works as the non-contended version, but provides a [portable]
-            handler at the cost of requiring a [value mod portable] argument and returning
-            a [Contended.Result.t]. |}]
 
+      (** [fiber_with l f] works as the non-contended version, but provides [portable]
+          handlers at the cost of requiring a [value mod portable] argument and returning
+          a [Contended.Result.t]. *)
       val fiber_with
         : ('a : value mod portable) 'b 'es.
-        local_ 'es Handler.List.Length.t
+        'es Handler.List.Length.t @ local
         -> ((t * 'es) Handler.List.t @ local portable -> 'a @ contended once unique -> 'b)
            @ once
         -> ('a, ('b, 'es) Result.t, 'es) Continuation.t @ unique
-      [@@ocaml.doc
-        {| [fiber_with l f] works as the non-contended version, but provides [portable]
-            handlers at the cost of requiring a [value mod portable] argument and
-            returning a [Contended.Result.t]. |}]
 
+      (** [run f] works as the non-contended version, but provides a [portable] handler at
+          the cost of returning a [Contended.Result.t]. *)
       val run
         :  (t Handler.t @ local portable -> 'a) @ once
         -> ('a, unit) Result.t @ once unique
-      [@@ocaml.doc
-        {| [run f] works as the non-contended version, but provides a [portable] handler
-            at the cost of returning a [Contended.Result.t]. |}]
 
+      (** [run_with hs f] works as the non-contended version, but provides [portable]
+          handlers at the cost of returning a [Contended.Result.t]. *)
       val run_with
         :  'es Handler.List.t @ local portable
         -> ((t * 'es) Handler.List.t @ local portable -> 'a) @ once
         -> ('a, 'es) Result.t @ once unique
-      [@@ocaml.doc
-        {| [run_with hs f] works as the non-contended version, but provides [portable]
-            handlers at the cost of returning a [Contended.Result.t]. |}]
 
       (** [perform h e] performs an effect [e] that will be handled by the contended [h] *)
       val perform
@@ -235,39 +227,35 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
           * ('o, ('a, 'p, 'es) result, 'es) Continuation.t
           -> ('a, 'p, 'es) result
 
+    (** [fiber f] constructs a continuation that runs the computation [f]. [f] is passed a
+        [t Handler.t] so that it can perform operations from the effect [t]. *)
     val fiber
-      :  (local_ 'p t Handler.t -> 'a @ once unique -> 'b) @ once
+      :  ('p t Handler.t @ local -> 'a @ once unique -> 'b) @ once
       -> ('a, ('b, 'p, unit) Result.t, unit) Continuation.t @ unique
-    [@@ocaml.doc
-      {| [fiber f] constructs a continuation that runs the computation [f]. [f] is passed
-          a [t Handler.t] so that it can perform operations from the effect [t]. |}]
 
+    (** [fiber_with l f] constructs a continuation that runs the computation [f] and
+        requires handlers for [l] additional effects. [f] is passed a typed list of
+        handlers so that it can perform operations from the effect [t] and the effects
+        ['es]. *)
     val fiber_with
-      :  local_ 'es Handler.List.Length.t
-      -> (local_ ('p t * 'es) Handler.List.t -> 'a @ once unique -> 'b) @ once
+      :  'es Handler.List.Length.t @ local
+      -> (('p t * 'es) Handler.List.t @ local -> 'a @ once unique -> 'b) @ once
       -> ('a, ('b, 'p, 'es) Result.t, 'es) Continuation.t @ unique
-    [@@ocaml.doc
-      {| [fiber_with l f] constructs a continuation that runs the computation [f] and
-          requires handlers for [l] additional effects. [f] is passed a typed list of
-          handlers so that it can perform operations from the effect [t] and the effects
-          ['es]. |}]
 
+    (** [run f] constructs a continuation that runs the computation [f] and immediately
+        resumes it. *)
     val run
-      :  (local_ 'p t Handler.t -> 'a) @ once
+      :  ('p t Handler.t @ local -> 'a) @ once
       -> ('a, 'p, unit) Result.t @ once unique
-    [@@ocaml.doc
-      {| [run f] constructs a continuation that runs the computation [f] and immediately
-          resumes it. |}]
 
+    (** [run_with hs f] constructs a continuation that runs the computation [f] and
+        immediately resumes it under the handlers [hs]. [f] is passed a typed list of
+        handlers so that it can perform operations from the effect [t] and the effects
+        ['es]. *)
     val run_with
-      :  local_ 'es Handler.List.t
-      -> (local_ ('p t * 'es) Handler.List.t -> 'a) @ once
+      :  'es Handler.List.t @ local
+      -> (('p t * 'es) Handler.List.t @ local -> 'a) @ once
       -> ('a, 'p, 'es) Result.t @ once unique
-    [@@ocaml.doc
-      {| [run_with hs f] constructs a continuation that runs the computation [f] and
-          immediately resumes it under the handlers [hs]. [f] is passed a typed list of
-          handlers so that it can perform operations from the effect [t] and the effects
-          ['es]. |}]
 
     (** [perform h e] performs an effect [e] that will be handled by [h] *)
     val perform : 'p t Handler.t @ local -> ('a, 'p, 'p t) ops -> 'a @ once unique
@@ -285,42 +273,38 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
               -> ('a, 'p, 'es) t
       end
 
+      (** [fiber f] works as the non-contended version, but provides a [portable] handler
+          at the cost of requiring a [value mod portable] argument and returning a
+          [Contended.Result.t]. *)
       val fiber
         : ('a : value mod portable) 'b 'p.
         ('p t Handler.t @ local portable -> 'a @ contended once unique -> 'b) @ once
         -> ('a, ('b, 'p, unit) Result.t, unit) Continuation.t @ unique
-      [@@ocaml.doc
-        {| [fiber f] works as the non-contended version, but provides a [portable]
-            handler at the cost of requiring a [value mod portable] argument and returning
-            a [Contended.Result.t]. |}]
 
+      (** [fiber_with l f] works as the non-contended version, but provides [portable]
+          handlers at the cost of requiring a [value mod portable] argument and returning
+          a [Contended.Result.t]. *)
       val fiber_with
         : ('a : value mod portable) 'b 'p 'es.
-        local_ 'es Handler.List.Length.t
+        'es Handler.List.Length.t @ local
         -> (('p t * 'es) Handler.List.t @ local portable
             -> 'a @ contended once unique
             -> 'b)
            @ once
         -> ('a, ('b, 'p, 'es) Result.t, 'es) Continuation.t @ unique
-      [@@ocaml.doc
-        {| [fiber_with l f] works as the non-contended version, but provides [portable]
-            handlers at the cost of requiring a [value mod portable] argument and
-            returning a [Contended.Result.t]. |}]
 
+      (** [run f] works as the non-contended version, but provides a [portable] handler at
+          the cost of returning a [Contended.Result.t]. *)
       val run
         :  ('p t Handler.t @ local portable -> 'a) @ once
         -> ('a, 'p, unit) Result.t @ once unique
-      [@@ocaml.doc
-        {| [run f] works as the non-contended version, but provides a [portable] handler
-            at the cost of returning a [Contended.Result.t]. |}]
 
+      (** [run_with hs f] works as the non-contended version, but provides [portable]
+          handlers at the cost of returning a [Contended.Result.t]. *)
       val run_with
         :  'es Handler.List.t @ local portable
         -> (('p t * 'es) Handler.List.t @ local portable -> 'a) @ once
         -> ('a, 'p, 'es) Result.t @ once unique
-      [@@ocaml.doc
-        {| [run_with hs f] works as the non-contended version, but provides [portable]
-            handlers at the cost of returning a [Contended.Result.t]. |}]
 
       (** [perform h e] performs an effect [e] that will be handled by the contended [h] *)
       val perform
@@ -384,40 +368,36 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
           ('o, 'p, 'q, ('p, 'q) t) ops @@ aliased global many
           * ('o, ('a, 'p, 'q, 'es) result, 'es) Continuation.t
           -> ('a, 'p, 'q, 'es) result
+      (** [fiber f] constructs a continuation that runs the computation [f]. [f] is passed
+          a [t Handler.t] so that it can perform operations from the effect [t]. *)
 
     val fiber
-      :  (local_ ('p, 'q) t Handler.t -> 'a @ once unique -> 'b) @ once
+      :  (('p, 'q) t Handler.t @ local -> 'a @ once unique -> 'b) @ once
       -> ('a, ('b, 'p, 'q, unit) Result.t, unit) Continuation.t @ unique
-    [@@ocaml.doc
-      {| [fiber f] constructs a continuation that runs the computation [f]. [f] is passed
-          a [t Handler.t] so that it can perform operations from the effect [t]. |}]
 
+    (** [fiber_with l f] constructs a continuation that runs the computation [f] and
+        requires handlers for [l] additional effects. [f] is passed a typed list of
+        handlers so that it can perform operations from the effect [t] and the effects
+        ['es]. *)
     val fiber_with
-      :  local_ 'es Handler.List.Length.t
-      -> (local_ (('p, 'q) t * 'es) Handler.List.t -> 'a @ once unique -> 'b) @ once
+      :  'es Handler.List.Length.t @ local
+      -> ((('p, 'q) t * 'es) Handler.List.t @ local -> 'a @ once unique -> 'b) @ once
       -> ('a, ('b, 'p, 'q, 'es) Result.t, 'es) Continuation.t @ unique
-    [@@ocaml.doc
-      {| [fiber_with l f] constructs a continuation that runs the computation [f] and
-          requires handlers for [l] additional effects. [f] is passed a typed list of
-          handlers so that it can perform operations from the effect [t] and the effects
-          ['es]. |}]
 
+    (** [run f] constructs a continuation that runs the computation [f] and immediately
+        resumes it. *)
     val run
-      :  (local_ ('p, 'q) t Handler.t -> 'a) @ once
+      :  (('p, 'q) t Handler.t @ local -> 'a) @ once
       -> ('a, 'p, 'q, unit) Result.t @ once unique
-    [@@ocaml.doc
-      {| [run f] constructs a continuation that runs the computation [f] and immediately
-          resumes it. |}]
 
+    (** [run_with hs f] constructs a continuation that runs the computation [f] and
+        immediately resumes it under the handlers [hs]. [f] is passed a typed list of
+        handlers so that it can perform operations from the effect [t] and the effects
+        ['es]. *)
     val run_with
-      :  local_ 'es Handler.List.t
-      -> (local_ (('p, 'q) t * 'es) Handler.List.t -> 'a) @ once
+      :  'es Handler.List.t @ local
+      -> ((('p, 'q) t * 'es) Handler.List.t @ local -> 'a) @ once
       -> ('a, 'p, 'q, 'es) Result.t @ once unique
-    [@@ocaml.doc
-      {| [run_with hs f] constructs a continuation that runs the computation [f] and
-          immediately resumes it under the handlers [hs]. [f] is passed a typed list of
-          handlers so that it can perform operations from the effect [t] and the effects
-          ['es]. |}]
 
     (** [perform h e] performs an effect [e] that will be handled by [h] *)
     val perform
@@ -438,42 +418,38 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
               -> ('a, 'p, 'q, 'es) t
       end
 
+      (** [fiber f] works as the non-contended version, but provides a [portable] handler
+          at the cost of requiring a [value mod portable] argument and returning a
+          [Contended.Result.t]. *)
       val fiber
         : ('a : value mod portable) 'b 'p 'q.
         (('p, 'q) t Handler.t @ local portable -> 'a @ contended once unique -> 'b) @ once
         -> ('a, ('b, 'p, 'q, unit) Result.t, unit) Continuation.t @ unique
-      [@@ocaml.doc
-        {| [fiber f] works as the non-contended version, but provides a [portable]
-            handler at the cost of requiring a [value mod portable] argument and returning
-            a [Contended.Result.t]. |}]
 
+      (** [fiber_with l f] works as the non-contended version, but provides [portable]
+          handlers at the cost of requiring a [value mod portable] argument and returning
+          a [Contended.Result.t]. *)
       val fiber_with
         : ('a : value mod portable) 'b 'p 'q 'es.
-        local_ 'es Handler.List.Length.t
+        'es Handler.List.Length.t @ local
         -> ((('p, 'q) t * 'es) Handler.List.t @ local portable
             -> 'a @ contended once unique
             -> 'b)
            @ once
         -> ('a, ('b, 'p, 'q, 'es) Result.t, 'es) Continuation.t @ unique
-      [@@ocaml.doc
-        {| [fiber_with l f] works as the non-contended version, but provides [portable]
-            handlers at the cost of requiring a [value mod portable] argument and
-            returning a [Contended.Result.t]. |}]
 
+      (** [run f] works as the non-contended version, but provides a [portable] handler at
+          the cost of returning a [Contended.Result.t]. *)
       val run
         :  (('p, 'q) t Handler.t @ local portable -> 'a) @ once
         -> ('a, 'p, 'q, unit) Result.t @ once unique
-      [@@ocaml.doc
-        {| [run f] works as the non-contended version, but provides a [portable] handler
-            at the cost of returning a [Contended.Result.t]. |}]
 
+      (** [run_with hs f] works as the non-contended version, but provides [portable]
+          handlers at the cost of returning a [Contended.Result.t]. *)
       val run_with
         :  'es Handler.List.t @ local portable
         -> ((('p, 'q) t * 'es) Handler.List.t @ local portable -> 'a) @ once
         -> ('a, 'p, 'q, 'es) Result.t @ once unique
-      [@@ocaml.doc
-        {| [run_with hs f] works as the non-contended version, but provides [portable]
-            handlers at the cost of returning a [Contended.Result.t]. |}]
 
       (** [perform h e] performs an effect [e] that will be handled by the contended [h] *)
       val perform
