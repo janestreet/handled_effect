@@ -617,23 +617,30 @@ let run_with
    Wrappers provide the handler at [portable], but require [portable]
    arguments and operations, which are marked as [contended]. *)
 module DRF : sig @@ portable
-  val fiber
-    : ('a : value mod portable) 'b 'e.
-    ('e Handler.t @ local portable -> 'a @ contended -> 'b) @ once
-    -> ('a, 'b, 'e, unit) continuation @ unique
+    val fiber
+      : ('a : value mod portable) 'b 'e.
+      ('e Handler.t @ local portable -> 'a @ contended once unique -> 'b) @ once
+      -> ('a, 'b, 'e, unit) continuation @ unique
 
-  val fiber_with
-    : ('a : value mod portable) 'b 'e 'es.
-    local_ 'es Handler.List.Length.t
-    -> (('e * 'es) Handler.List.t @ local portable -> 'a @ contended -> 'b) @ once
-    -> ('a, 'b, 'e, 'es) continuation @ unique
+    val fiber_with
+      : ('a : value mod portable) 'b 'e 'es.
+      'es Handler.List.Length.t @ local
+      -> (('e * 'es) Handler.List.t @ local portable -> 'a @ contended once unique -> 'b)
+         @ once
+      -> ('a, 'b, 'e, 'es) continuation @ unique
 
-  val run : ('e Handler.t @ local portable -> 'a) @ once -> ('a, 'e, unit) res @ unique
+    val run
+      :  ('e Handler.t @ local portable -> 'a) @ once
+      -> ('a, 'e, unit) res @ once unique
+    (* Returns a [res] to be [Obj.magic]ed into the contended result type with
+       [op @@ contended]. *)
 
-  val run_with
-    :  'es Handler.List.t @ local portable
-    -> (('e * 'es) Handler.List.t @ local portable -> 'a) @ once
-    -> ('a, 'e, 'es) res @ unique
+    val run_with
+      :  'es Handler.List.t @ local portable
+      -> (('e * 'es) Handler.List.t @ local portable -> 'a) @ once
+      -> ('a, 'e, 'es) res @ once unique
+    (* Returns a [res] to be [Obj.magic]ed into the contended result type with
+       [op @@ contended]. *)
 end = struct
   let[@inline] fiber f =
     let f h a =
