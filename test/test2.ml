@@ -1,0 +1,41 @@
+open Handled_effect
+open Printf
+
+type 'a op = E : int -> int op
+
+module Eff = Handled_effect.Make (struct
+    type 'a t = 'a op
+  end)
+
+let f h =
+  printf "perform effect (E 0)\n%!";
+  let v = Eff.perform h (E 0) in
+  printf "perform returns %d\n%!" v;
+  v + 1
+;;
+
+let rec handle = function
+  | Eff.Value v ->
+    printf "done %d\n%!" v;
+    v + 1
+  | Eff.Exception e -> raise e
+  | Eff.Operation (E v, k) ->
+    printf "caught effect (E %d). continuing..\n%!" v;
+    let v = handle (continue k (v + 1) []) in
+    printf "continue returns %d\n%!" v;
+    v + 1
+;;
+
+let%expect_test ("performing effects" [@tags "runtime5-only"]) =
+  let v = handle (Eff.run f) in
+  printf "result=%d\n%!" v;
+  [%expect
+    {|
+    perform effect (E 0)
+    caught effect (E 0). continuing..
+    perform returns 1
+    done 2
+    continue returns 3
+    result=4
+    |}]
+;;

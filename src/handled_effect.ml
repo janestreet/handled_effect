@@ -1,4 +1,4 @@
-include Effect_intf
+include Handled_effect_intf
 
 module Obj = struct
   include Stdlib.Obj
@@ -15,6 +15,12 @@ module Obj = struct
   external magic_portable_at_unique_once
     :  'a @ once unique
     -> 'a @ once portable unique
+    @@ portable
+    = "%identity"
+
+  external magic_uncontended_at_unique_once
+    :  'a @ contended once unique
+    -> 'a @ once unique
     @@ portable
     = "%identity"
 end
@@ -119,7 +125,7 @@ module Handler : sig @@ portable
   type 'e t' = private ..
 
   (** Heap-allocated handler. *)
-  type 'e t = { h : 'e t' @@ aliased global } [@@unboxed]
+  type 'e t = { h : 'e t' @@ global } [@@unboxed]
 
   include Handler with type 'e t := 'e t
 
@@ -144,7 +150,7 @@ module Handler : sig @@ portable
   val create : unit -> (module Create with type e = 'e and type es = 'es)
 end = struct
   type 'e t' = ..
-  type 'e t = { h : 'e t' @@ aliased global } [@@unboxed]
+  type 'e t = { h : 'e t' @@ global } [@@unboxed]
   type _ t' += Dummy : 'a t'
 
   module List = struct
@@ -416,10 +422,10 @@ module Must_not_enter_gc = struct
 end
 
 type (+'a, 'es) r =
-  | Val : 'a @@ aliased global many -> ('a, 'es) r
-  | Exn : exn @@ aliased global many -> ('a, 'es) r
+  | Val : 'a @@ global many -> ('a, 'es) r
+  | Exn : exn @@ global many -> ('a, 'es) r
   | Op :
-      ('o, 'e) op @@ aliased global many
+      ('o, 'e) op @@ global many
       * ('e, 'es) Raw_handler.t
       * ('o, ('a, 'es) r) cont
       * last_fiber
@@ -485,18 +491,19 @@ let run_stack
   Must_not_enter_gc.with_stack valuec exnc { effc } f h
 ;;
 
-type (-'a, +'b, 'e, 'es) continuation =
+type (-'a, +'b, 'e, 'es) continuation : value mod many =
   | Cont :
       { cont : ('a, ('b, 'e * 'es) r) cont
-      ; mapping : 'es Mapping.t @@ aliased global many
+      ; mapping : 'es Mapping.t @@ global many
       }
       -> ('a, 'b, 'e, 'es) continuation
+[@@unsafe_allow_any_mode_crossing "CR layouts v2.8: GADT mode crossing"]
 
 type ('a, 'e, 'es) res =
-  | Value : 'a @@ aliased global many -> ('a, 'e, 'es) res
-  | Exception : exn @@ aliased global many -> ('a, 'e, 'es) res
+  | Value : 'a @@ global many -> ('a, 'e, 'es) res
+  | Exception : exn @@ global many -> ('a, 'e, 'es) res
   | Operation :
-      ('o, 'e) op @@ aliased global many * ('o, 'a, 'e, 'es) continuation
+      ('o, 'e) op @@ global many * ('o, 'a, 'e, 'es) continuation
       -> ('a, 'e, 'es) res
 
 let get_callstack (Cont { cont; mapping }) i =
@@ -660,6 +667,64 @@ end = struct
   ;;
 end
 
+module DRF_portable : sig @@ portable
+  val fiber
+    : ('a : value mod portable) 'b 'e.
+    ('e Handler.t @ contended local portable -> 'a @ contended once unique -> 'b)
+    @ once portable
+    -> ('a, 'b, 'e, unit) continuation @ portable unique
+
+  val fiber_with
+    : ('a : value mod portable) 'b 'e 'es.
+    'es Handler.List.Length.t @ local
+    -> (('e * 'es) Handler.List.t @ contended local portable
+        -> 'a @ contended once unique
+        -> 'b)
+       @ once portable
+    -> ('a, 'b, 'e, 'es) continuation @ portable unique
+
+  val run
+    :  ('e Handler.t @ contended local portable -> 'a) @ once portable
+    -> ('a, 'e, unit) res @ once unique
+
+  val run_with
+    :  'es Handler.List.t @ contended local portable
+    -> (('e * 'es) Handler.List.t @ contended local portable -> 'a) @ once portable
+    -> ('a, 'e, 'es) res @ once unique
+end = struct
+  let[@inline] fiber f =
+    let f h a =
+      f
+        (Obj.magic_portable h)
+        (Obj.magic_portable_at_unique_once (Obj.magic_uncontended_at_unique_once a))
+      [@nontail]
+    in
+    let k : ('a, 'b, 'e, unit) continuation = Obj.magic_at_unique (fiber f) in
+    Obj.magic_portable_at_unique_once k
+  ;;
+
+  let[@inline] fiber_with hs f =
+    let f hs a =
+      f
+        (Obj.magic_portable hs)
+        (Obj.magic_portable_at_unique_once (Obj.magic_uncontended_at_unique_once a))
+      [@nontail]
+    in
+    let k : ('a, 'b, 'e, 'es) continuation = Obj.magic_at_unique (fiber_with hs f) in
+    Obj.magic_portable_at_unique_once k
+  ;;
+
+  let[@inline] run f =
+    let f h = f (Obj.magic_portable h) [@nontail] in
+    run f
+  ;;
+
+  let[@inline] run_with (hs @ contended local portable) f =
+    let f hs = f (Obj.magic_portable hs) [@nontail] in
+    run_with (Obj.magic_uncontended hs) f [@nontail]
+  ;;
+end
+
 module Continuation = struct
   type (-'a, +'b, 'es) t : value mod contended many =
     | Continuation : ('a, 'c, 'e, 'es) continuation -> ('a, 'b, 'es) t
@@ -694,7 +759,7 @@ let discontinue_with_backtrace (type a b es) (k : (a, b, es) Continuation.t) e b
   (Obj.magic_at_unique_once res : b)
 ;;
 
-include Effect_intf.Definitions (Handler) (Continuation)
+include Handled_effect_intf.Definitions (Handler) (Continuation)
 
 module Make_generic (Types : sig
     type ('p, 'q) t
@@ -731,7 +796,8 @@ module Make_generic_contended (Types : sig
     type ('a, 'p, 'q, 'e) ops
     type ('a, 'p, 'q, 'es) result
   end) :
-  S2_generic_contended
+  S2_generic
+  [@mode portable nonportable]
   with type ('p, 'q) t := ('p, 'q) Types.t
    and type ('a, 'p, 'q, 'e) ops := ('a, 'p, 'q, 'e) Types.ops
    and type ('a, 'p, 'q, 'es) result := ('a, 'p, 'q, 'es) Types.result = struct
@@ -758,16 +824,68 @@ module Make_generic_contended (Types : sig
   ;;
 end
 
+module Make_generic_portable (Types : sig
+    type ('p, 'q) t
+    type ('a, 'p, 'q, 'e) ops
+    type ('a, 'p, 'q, 'es) result
+  end) :
+  S2_generic
+  [@mode portable portable]
+  with type ('p, 'q) t := ('p, 'q) Types.t
+   and type ('a, 'p, 'q, 'e) ops := ('a, 'p, 'q, 'e) Types.ops
+   and type ('a, 'p, 'q, 'es) result := ('a, 'p, 'q, 'es) Types.result = struct
+  include Types
+
+  let fiber f = Continuation.Continuation (DRF_portable.fiber f)
+  let fiber_with l f = Continuation.Continuation (DRF_portable.fiber_with l f)
+
+  let run (type a p q) f =
+    let res : (a, (p, q) t, unit) res = DRF_portable.run f in
+    (Obj.magic_at_unique_once res : (a, p, q, unit) result)
+  ;;
+
+  let run_with (type a p q es) hs f =
+    let res : (a, (p, q) t, es) res = DRF_portable.run_with hs f in
+    (Obj.magic_at_unique_once res : (a, p, q, es) result)
+  ;;
+
+  let perform (type a p q) (h : _ Handler.t) (op : (a, p, q, (p, q) t) ops @ portable) =
+    let op : (a, (p, q) t) op = Obj.magic op in
+    perform_ (Obj.magic_uncontended h.h, op)
+  ;;
+end
+
+module%template
+  [@mode
+    (p_arg, c_arg) = ((nonportable, uncontended), (portable, contended))
+    , (p_res, c_res) = ((nonportable, uncontended), (portable, contended))] Make_rec_base
+    (T : sig
+       type t
+     end)
+    (Ops : Operations_rec) =
+struct
+  type ('a, 'es) result =
+    | Value : 'a @@ global many -> ('a, 'es) result
+    | Exception : exn @@ global many -> ('a, 'es) result
+    | Operation :
+        ('o, T.t) Ops.t @@ c_arg global many
+        * ('o, ('a, 'es) result, 'es) Continuation.t @@ p_res
+        -> ('a, 'es) result
+
+  module Result = struct
+    type ('a, 'es) t = ('a, 'es) result
+  end
+end
+
 module Make_rec (Ops : Operations_rec) : S with type ('a, 'e) ops := ('a, 'e) Ops.t =
 struct
   type t
 
-  type ('a, 'es) result =
-    | Value : 'a @@ aliased global many -> ('a, 'es) result
-    | Exception : exn @@ aliased global many -> ('a, 'es) result
-    | Operation :
-        ('o, t) Ops.t @@ aliased global many * ('o, ('a, 'es) result, 'es) Continuation.t
-        -> ('a, 'es) result
+  module T = struct
+    type nonrec t = t
+  end
+
+  include Make_rec_base (T) (Ops)
 
   include Make_generic (struct
       type nonrec (_, _) t = t
@@ -775,28 +893,24 @@ struct
       type nonrec ('a, _, _, 'es) result = ('a, 'es) result
     end)
 
-  module Result = struct
-    type ('a, 'es) t = ('a, 'es) result
-  end
-
   module Contended = struct
-    type ('a, 'es) result =
-      | Value : 'a @@ aliased global many -> ('a, 'es) result
-      | Exception : exn @@ aliased global many -> ('a, 'es) result
-      | Operation :
-          ('o, t) Ops.t @@ aliased contended global many
-          * ('o Modes.Portable.t, ('a, 'es) result, 'es) Continuation.t
-          -> ('a, 'es) result
+    include Make_rec_base [@mode portable nonportable] (T) (Ops)
 
     include Make_generic_contended (struct
         type nonrec (_, _) t = t
         type nonrec ('a, _, _, 'e) ops = ('a, 'e) Ops.t
         type nonrec ('a, _, _, 'es) result = ('a, 'es) result
       end)
+  end
 
-    module Result = struct
-      type ('a, 'es) t = ('a, 'es) result
-    end
+  module Portable = struct
+    include Make_rec_base [@mode portable portable] (T) (Ops)
+
+    include Make_generic_portable (struct
+        type nonrec (_, _) t = t
+        type nonrec ('a, _, _, 'e) ops = ('a, 'e) Ops.t
+        type nonrec ('a, _, _, 'es) result = ('a, 'es) result
+      end)
   end
 
   module Handler = struct
@@ -812,17 +926,37 @@ module Make (Ops : Operations) : S with type ('a, 'e) ops := 'a Ops.t = Make_rec
     type ('a, 'e) t = 'a Ops.t
   end)
 
+module%template
+  [@mode
+    (p_arg, c_arg) = ((nonportable, uncontended), (portable, contended))
+    , (p_res, c_res) = ((nonportable, uncontended), (portable, contended))] Make1_rec_base
+    (T : sig
+       type 'p t
+     end)
+    (Ops : Operations1_rec) =
+struct
+  type ('a, 'p, 'es) result =
+    | Value : 'a @@ global many -> ('a, 'p, 'es) result
+    | Exception : exn @@ global many -> ('a, 'p, 'es) result
+    | Operation :
+        ('o, 'p, 'p T.t) Ops.t @@ c_arg global many
+        * ('o, ('a, 'p, 'es) result, 'es) Continuation.t @@ p_res
+        -> ('a, 'p, 'es) result
+
+  module Result = struct
+    type ('a, 'p, 'es) t = ('a, 'p, 'es) result
+  end
+end
+
 module Make1_rec (Ops : Operations1_rec) :
   S1 with type ('a, 'p, 'e) ops := ('a, 'p, 'e) Ops.t = struct
   type 'p t
 
-  type ('a, 'p, 'es) result =
-    | Value : 'a @@ aliased global many -> ('a, 'p, 'es) result
-    | Exception : exn @@ aliased global many -> ('a, 'p, 'es) result
-    | Operation :
-        ('o, 'p, 'p t) Ops.t @@ aliased global many
-        * ('o, ('a, 'p, 'es) result, 'es) Continuation.t
-        -> ('a, 'p, 'es) result
+  module T = struct
+    type nonrec 'p t = 'p t
+  end
+
+  include Make1_rec_base (T) (Ops)
 
   include Make_generic (struct
       type nonrec ('p, _) t = 'p t
@@ -830,28 +964,24 @@ module Make1_rec (Ops : Operations1_rec) :
       type nonrec ('a, 'p, _, 'es) result = ('a, 'p, 'es) result
     end)
 
-  module Result = struct
-    type ('a, 'p, 'es) t = ('a, 'p, 'es) result
-  end
-
   module Contended = struct
-    type ('a, 'p, 'es) result =
-      | Value : 'a @@ aliased global many -> ('a, 'p, 'es) result
-      | Exception : exn @@ aliased global many -> ('a, 'p, 'es) result
-      | Operation :
-          ('o, 'p, 'p t) Ops.t @@ aliased contended global many
-          * ('o Modes.Portable.t, ('a, 'p, 'es) result, 'es) Continuation.t
-          -> ('a, 'p, 'es) result
+    include Make1_rec_base [@mode portable nonportable] (T) (Ops)
 
     include Make_generic_contended (struct
         type nonrec ('p, _) t = 'p t
         type nonrec ('a, 'p, _, 'e) ops = ('a, 'p, 'e) Ops.t
         type nonrec ('a, 'p, _, 'es) result = ('a, 'p, 'es) result
       end)
+  end
 
-    module Result = struct
-      type ('a, 'p, 'es) t = ('a, 'p, 'es) result
-    end
+  module Portable = struct
+    include Make1_rec_base [@mode portable portable] (T) (Ops)
+
+    include Make_generic_portable (struct
+        type nonrec ('p, _) t = 'p t
+        type nonrec ('a, 'p, _, 'e) ops = ('a, 'p, 'e) Ops.t
+        type nonrec ('a, 'p, _, 'es) result = ('a, 'p, 'es) result
+      end)
   end
 
   module Handler = struct
@@ -868,17 +998,37 @@ Make1_rec (struct
     type ('a, 'p, 'e) t = ('a, 'p) Ops.t
   end)
 
+module%template
+  [@mode
+    (p_arg, c_arg) = ((nonportable, uncontended), (portable, contended))
+    , (p_res, c_res) = ((nonportable, uncontended), (portable, contended))] Make2_rec_base
+    (T : sig
+       type ('p, 'q) t
+     end)
+    (Ops : Operations2_rec) =
+struct
+  type ('a, 'p, 'q, 'es) result =
+    | Value : 'a @@ global many -> ('a, 'p, 'q, 'es) result
+    | Exception : exn @@ global many -> ('a, 'p, 'q, 'es) result
+    | Operation :
+        ('o, 'p, 'q, ('p, 'q) T.t) Ops.t @@ c_arg global many
+        * ('o, ('a, 'p, 'q, 'es) result, 'es) Continuation.t @@ p_res
+        -> ('a, 'p, 'q, 'es) result
+
+  module Result = struct
+    type ('a, 'p, 'q, 'es) t = ('a, 'p, 'q, 'es) result
+  end
+end
+
 module Make2_rec (Ops : Operations2_rec) :
   S2 with type ('a, 'p, 'q, 'e) ops := ('a, 'p, 'q, 'e) Ops.t = struct
   type ('p, 'q) t
 
-  type ('a, 'p, 'q, 'es) result =
-    | Value : 'a @@ aliased global many -> ('a, 'p, 'q, 'es) result
-    | Exception : exn @@ aliased global many -> ('a, 'p, 'q, 'es) result
-    | Operation :
-        ('o, 'p, 'q, ('p, 'q) t) Ops.t @@ aliased global many
-        * ('o, ('a, 'p, 'q, 'es) result, 'es) Continuation.t
-        -> ('a, 'p, 'q, 'es) result
+  module T = struct
+    type nonrec ('p, 'q) t = ('p, 'q) t
+  end
+
+  include Make2_rec_base (T) (Ops)
 
   include Make_generic (struct
       type nonrec ('p, 'q) t = ('p, 'q) t
@@ -886,28 +1036,24 @@ module Make2_rec (Ops : Operations2_rec) :
       type nonrec ('a, 'p, 'q, 'es) result = ('a, 'p, 'q, 'es) result
     end)
 
-  module Result = struct
-    type ('a, 'p, 'q, 'es) t = ('a, 'p, 'q, 'es) result
-  end
-
   module Contended = struct
-    type ('a, 'p, 'q, 'es) result =
-      | Value : 'a @@ aliased global many -> ('a, 'p, 'q, 'es) result
-      | Exception : exn @@ aliased global many -> ('a, 'p, 'q, 'es) result
-      | Operation :
-          ('o, 'p, 'q, ('p, 'q) t) Ops.t @@ aliased contended global many
-          * ('o Modes.Portable.t, ('a, 'p, 'q, 'es) result, 'es) Continuation.t
-          -> ('a, 'p, 'q, 'es) result
+    include Make2_rec_base [@mode portable nonportable] (T) (Ops)
 
     include Make_generic_contended (struct
         type nonrec ('p, 'q) t = ('p, 'q) t
         type nonrec ('a, 'p, 'q, 'e) ops = ('a, 'p, 'q, 'e) Ops.t
         type nonrec ('a, 'p, 'q, 'es) result = ('a, 'p, 'q, 'es) result
       end)
+  end
 
-    module Result = struct
-      type ('a, 'p, 'q, 'es) t = ('a, 'p, 'q, 'es) result
-    end
+  module Portable = struct
+    include Make2_rec_base [@mode portable portable] (T) (Ops)
+
+    include Make_generic_portable (struct
+        type nonrec ('p, 'q) t = ('p, 'q) t
+        type nonrec ('a, 'p, 'q, 'e) ops = ('a, 'p, 'q, 'e) Ops.t
+        type nonrec ('a, 'p, 'q, 'es) result = ('a, 'p, 'q, 'es) result
+      end)
   end
 
   module Handler = struct

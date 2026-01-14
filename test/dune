@@ -1,0 +1,8 @@
+(library
+ (name handled_effect_test)
+ (libraries basement capsule
+   expect_test_helpers_core.expect_test_helpers_base handled_effect threads
+   unique)
+ (flags :standard -alert -experimental_runtime5)
+ (preprocess
+  (pps ppx_jane)))

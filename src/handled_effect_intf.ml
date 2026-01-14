@@ -42,8 +42,15 @@ module type Continuation = sig
 end
 
 module Definitions (Handler : Handler) (Continuation : Continuation) = struct
-  (** The generic signature for effects with 2 or fewer parameters. *)
-  module type S2_generic = sig @@ portable
+  (** The generic signature for effects with 2 or fewer parameters.
+
+      This is not a truly mode-polymorphic signature. Only select instances may be used,
+      and each instance requires its specific result type for soundness. *)
+  module type%template
+    [@mode
+      (p_arg, c_arg) = ((nonportable, uncontended), (portable, contended))
+      , (p_res, c_res) = ((nonportable, uncontended), (portable, contended))] S2_generic = sig
+    @@ portable
     (** [('p, 'q) t] represents the effect. It only appears as the argument to
         [Handler.t]. *)
     type ('p, 'q) t
@@ -60,22 +67,28 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
     (** [fiber f] constructs a continuation that runs the computation [f]. [f] is passed a
         [t Handler.t] so that it can perform operations from the effect [t]. *)
     val fiber
-      :  (('p, 'q) t Handler.t @ local -> 'a @ once unique -> 'b) @ once
-      -> ('a, ('b, 'p, 'q, unit) result, unit) Continuation.t @ unique
+      : ('a : value mod p_arg) 'b 'p 'q.
+      (('p, 'q) t Handler.t @ c_res local p_arg -> 'a @ c_arg once unique -> 'b)
+      @ once p_res
+      -> ('a, ('b, 'p, 'q, unit) result, unit) Continuation.t @ p_res unique
 
     (** [fiber_with l f] constructs a continuation that runs the computation [f] and
         requires handlers for [l] additional effects. [f] is passed a typed list of
         handlers so that it can perform operations from the effect [t] and the effects
         ['es]. *)
     val fiber_with
-      :  'es Handler.List.Length.t @ local
-      -> ((('p, 'q) t * 'es) Handler.List.t @ local -> 'a @ once unique -> 'b) @ once
-      -> ('a, ('b, 'p, 'q, 'es) result, 'es) Continuation.t @ unique
+      : ('a : value mod p_arg) 'b 'p 'q 'es.
+      'es Handler.List.Length.t @ local
+      -> ((('p, 'q) t * 'es) Handler.List.t @ c_res local p_arg
+          -> 'a @ c_arg once unique
+          -> 'b)
+         @ once p_res
+      -> ('a, ('b, 'p, 'q, 'es) result, 'es) Continuation.t @ p_res unique
 
     (** [run f] constructs a continuation that runs the computation [f] and immediately
         resumes it. *)
     val run
-      :  (('p, 'q) t Handler.t @ local -> 'a) @ once
+      :  (('p, 'q) t Handler.t @ c_res local p_arg -> 'a) @ once p_res
       -> ('a, 'p, 'q, unit) result @ once unique
 
     (** [run_with hs f] constructs a continuation that runs the computation [f] and
@@ -83,69 +96,48 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
         handlers so that it can perform operations from the effect [t] and the effects
         ['es]. *)
     val run_with
-      :  'es Handler.List.t @ local
-      -> ((('p, 'q) t * 'es) Handler.List.t @ local -> 'a) @ once
+      :  'es Handler.List.t @ c_res local p_arg
+      -> ((('p, 'q) t * 'es) Handler.List.t @ c_res local p_arg -> 'a) @ once p_res
       -> ('a, 'p, 'q, 'es) result @ once unique
 
     (** [perform h e] performs an effect [e] that will be handled by [h] *)
     val perform
-      :  ('p, 'q) t Handler.t @ local
-      -> ('a, 'p, 'q, ('p, 'q) t) ops
-      -> 'a @ once unique
+      : ('a : value mod p_arg) 'p 'q.
+      ('p, 'q) t Handler.t @ c_arg local
+      -> ('a, 'p, 'q, ('p, 'q) t) ops @ p_arg
+      -> 'a @ c_arg once unique
   end
 
-  module type S2_generic_contended = sig @@ portable
-    (** [('p, 'q) t] represents the effect. It only appears as the argument to
-        [Handler.t]. *)
-    type ('p, 'q) t
+  (** The signature for effects with no type parameters at a combination of modes.
 
-    (** [('a, 'p, 'q, 'e) ops] is the type of operations of the effect [('p, 'q) t]. ['a]
-        is the return type of the given operation. ['e] will be filled in with
-        [('p, 'q) t] to tie the knot on recursive operations. *)
-    type ('a, 'p, 'q, 'e) ops
+      This is not a truly mode-polymorphic signature. Only select instances may be used. *)
+  module type%template
+    [@mode
+      (p_arg, c_arg) = ((nonportable, uncontended), (portable, contended))
+      , (p_res, c_res) = ((nonportable, uncontended), (portable, contended))] S_base = sig
+    type t
+    type ('a, 'e) ops
 
-    (** [('a, 'p, 'q, 'es) t] is the result of running a continuation until it either
-        finishes and returns an ['a] value, raises an exception, or performs an operation. *)
-    type ('a, 'p, 'q, 'es) result
+    type ('a, 'es) result =
+      | Value : 'a @@ global many -> ('a, 'es) result
+      | Exception : exn @@ global many -> ('a, 'es) result
+      | Operation :
+          ('o, t) ops @@ c_arg global many
+          * ('o, ('a, 'es) result, 'es) Continuation.t @@ p_res
+          -> ('a, 'es) result
+      (** [('a, 'es) t] is the result of running a continuation until it either finishes
+          and returns an ['a] value, raises an exception, or performs an operation. *)
 
-    (** [fiber f] works as the non-contended version, but provides a [portable] handler at
-        the cost of requiring a [value mod portable] argument and returning a
-        [Contended.Result.t]. *)
-    val fiber
-      : ('a : value mod portable) 'b 'p 'q.
-      (('p, 'q) t Handler.t @ local portable -> 'a @ contended once unique -> 'b) @ once
-      -> ('a, ('b, 'p, 'q, unit) result, unit) Continuation.t @ unique
+    include
+      S2_generic
+      [@mode p_arg p_res]
+      with type (_, _) t := t
+       and type ('a, _, _, 'e) ops := ('a, 'e) ops
+       and type ('a, _, _, 'es) result := ('a, 'es) result
 
-    (** [fiber_with l f] works as the non-contended version, but provides [portable]
-        handlers at the cost of requiring a [value mod portable] argument and returning a
-        [Contended.Result.t]. *)
-    val fiber_with
-      : ('a : value mod portable) 'b 'p 'q 'es.
-      'es Handler.List.Length.t @ local
-      -> ((('p, 'q) t * 'es) Handler.List.t @ local portable
-          -> 'a @ contended once unique
-          -> 'b)
-         @ once
-      -> ('a, ('b, 'p, 'q, 'es) result, 'es) Continuation.t @ unique
-
-    (** [run f] works as the non-contended version, but provides a [portable] handler at
-        the cost of returning a [Contended.Result.t]. *)
-    val run
-      :  (('p, 'q) t Handler.t @ local portable -> 'a) @ once
-      -> ('a, 'p, 'q, unit) result @ once unique
-
-    (** [run_with hs f] works as the non-contended version, but provides [portable]
-        handlers at the cost of returning a [Contended.Result.t]. *)
-    val run_with
-      :  'es Handler.List.t @ local portable
-      -> ((('p, 'q) t * 'es) Handler.List.t @ local portable -> 'a) @ once
-      -> ('a, 'p, 'q, 'es) result @ once unique
-
-    (** [perform h e] performs an effect [e] that will be handled by the contended [h] *)
-    val perform
-      :  ('p, 'q) t Handler.t @ contended local
-      -> ('a, 'p, 'q, ('p, 'q) t) ops @ portable
-      -> 'a @ contended once unique
+    module Result : sig @@ portable
+      type ('a, 'es) t = ('a, 'es) result
+    end
   end
 
   (** The signature for effects with no type parameters *)
@@ -157,45 +149,22 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
         operations. *)
     type ('a, 'e) ops
 
-    type ('a, 'es) result =
-      | Value : 'a @@ aliased global many -> ('a, 'es) result
-      | Exception : exn @@ aliased global many -> ('a, 'es) result
-      | Operation :
-          ('o, t) ops @@ aliased global many * ('o, ('a, 'es) result, 'es) Continuation.t
-          -> ('a, 'es) result
-      (** [('a, 'es) t] is the result of running a continuation until it either finishes
-          and returns an ['a] value, raises an exception, or performs an operation. *)
-
-    include
-      S2_generic
-      with type (_, _) t := t
-       and type ('a, _, _, 'e) ops := ('a, 'e) ops
-       and type ('a, _, _, 'es) result := ('a, 'es) result
-
-    module Result : sig @@ portable
-      type ('a, 'es) t = ('a, 'es) result
-    end
+    include S_base with type t := t and type ('a, 'e) ops := ('a, 'e) ops
 
     module Contended : sig
-      type ('a, 'es) result =
-        | Value : 'a @@ aliased global many -> ('a, 'es) result
-        | Exception : exn @@ aliased global many -> ('a, 'es) result
-        | Operation :
-            ('o, t) ops @@ aliased contended global many
-            * ('o Modes.Portable.t, ('a, 'es) result, 'es) Continuation.t
-            -> ('a, 'es) result
-        (** [('a, 'es) t] is the result of running a continuation until it either finishes
-            and returns an ['a] value, raises an exception, or performs an operation. *)
-
       include
-        S2_generic_contended
-        with type (_, _) t := t
-         and type ('a, _, _, 'e) ops := ('a, 'e) ops
-         and type ('a, _, _, 'es) result := ('a, 'es) result
+        S_base
+        [@mode portable nonportable]
+        with type t := t
+         and type ('a, 'e) ops := ('a, 'e) ops
+    end
 
-      module Result : sig @@ portable
-        type ('a, 'es) t = ('a, 'es) result
-      end
+    module Portable : sig @@ portable
+      include
+        S_base
+        [@mode portable portable]
+        with type t := t
+         and type ('a, 'e) ops := ('a, 'e) ops
     end
 
     module Handler : sig
@@ -204,6 +173,39 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
 
     module Continuation : sig
       type ('a, 'b, 'es) t = ('a, ('b, 'es) result, 'es) Continuation.t
+    end
+  end
+
+  (** The signature for effects with one type parameter at a combination of modes.
+
+      This is not a truly mode-polymorphic signature. Only select instances may be used. *)
+  module type%template
+    [@mode
+      (p_arg, c_arg) = ((nonportable, uncontended), (portable, contended))
+      , (p_res, c_res) = ((nonportable, uncontended), (portable, contended))] S1_base = sig
+    type 'p t
+    type ('a, 'p, 'e) ops
+
+    type ('a, 'p, 'es) result =
+      | Value : 'a @@ global many -> ('a, 'p, 'es) result
+      | Exception : exn @@ global many -> ('a, 'p, 'es) result
+      | Operation :
+          ('o, 'p, 'p t) ops @@ c_arg global many
+          * ('o, ('a, 'p, 'es) result, 'es) Continuation.t @@ p_res
+          -> ('a, 'p, 'es) result
+      (** [('a, 'p, 'es) t] is the result of running a continuation until it either
+          finishes and returns an ['a] value, raises an exception, or performs an
+          operation. *)
+
+    include
+      S2_generic
+      [@mode p_arg p_res]
+      with type ('p, _) t := 'p t
+       and type ('a, 'p, _, 'e) ops := ('a, 'p, 'e) ops
+       and type ('a, 'p, _, 'e) result := ('a, 'p, 'e) result
+
+    module Result : sig @@ portable
+      type ('a, 'p, 'es) t = ('a, 'p, 'es) result
     end
   end
 
@@ -216,48 +218,22 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
         recursive operations. *)
     type ('a, 'p, 'e) ops
 
-    type ('a, 'p, 'es) result =
-      | Value : 'a @@ aliased global many -> ('a, 'p, 'es) result
-      | Exception : exn @@ aliased global many -> ('a, 'p, 'es) result
-      | Operation :
-          ('o, 'p, 'p t) ops @@ aliased global many
-          * ('o, ('a, 'p, 'es) result, 'es) Continuation.t
-          -> ('a, 'p, 'es) result
-      (** [('a, 'p, 'es) t] is the result of running a continuation until it either
-          finishes and returns an ['a] value, raises an exception, or performs an
-          operation. *)
-
-    include
-      S2_generic
-      with type ('p, _) t := 'p t
-       and type ('a, 'p, _, 'e) ops := ('a, 'p, 'e) ops
-       and type ('a, 'p, _, 'e) result := ('a, 'p, 'e) result
-
-    module Result : sig @@ portable
-      type ('a, 'p, 'es) t = ('a, 'p, 'es) result
-    end
+    include S1_base with type 'p t := 'p t and type ('a, 'p, 'e) ops := ('a, 'p, 'e) ops
 
     module Contended : sig @@ portable
-      type ('a, 'p, 'es) result =
-        | Value : 'a @@ aliased global many -> ('a, 'p, 'es) result
-        | Exception : exn @@ aliased global many -> ('a, 'p, 'es) result
-        | Operation :
-            ('o, 'p, 'p t) ops @@ aliased contended global many
-            * ('o Modes.Portable.t, ('a, 'p, 'es) result, 'es) Continuation.t
-            -> ('a, 'p, 'es) result
-        (** [('a, 'p, 'es) t] is the result of running a continuation until it either
-            finishes and returns an ['a] value, raises an exception, or performs an
-            operation. *)
-
       include
-        S2_generic_contended
-        with type ('p, _) t := 'p t
-         and type ('a, 'p, _, 'e) ops := ('a, 'p, 'e) ops
-         and type ('a, 'p, _, 'e) result := ('a, 'p, 'e) result
+        S1_base
+        [@mode portable nonportable]
+        with type 'p t := 'p t
+         and type ('a, 'p, 'e) ops := ('a, 'p, 'e) ops
+    end
 
-      module Result : sig @@ portable
-        type ('a, 'p, 'es) t = ('a, 'p, 'es) result
-      end
+    module Portable : sig @@ portable
+      include
+        S1_base
+        [@mode portable portable]
+        with type 'p t := 'p t
+         and type ('a, 'p, 'e) ops := ('a, 'p, 'e) ops
     end
 
     module Handler : sig
@@ -266,6 +242,39 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
 
     module Continuation : sig
       type ('a, 'b, 'p, 'es) t = ('a, ('b, 'p, 'es) result, 'es) Continuation.t
+    end
+  end
+
+  (** The signature for effects with two type parameters at a combination of modes.
+
+      This is not a truly mode-polymorphic signature. Only select instances may be used. *)
+  module type%template
+    [@mode
+      (p_arg, c_arg) = ((nonportable, uncontended), (portable, contended))
+      , (p_res, c_res) = ((nonportable, uncontended), (portable, contended))] S2_base = sig
+    type ('p, 'q) t
+    type ('a, 'p, 'q, 'e) ops
+
+    type ('a, 'p, 'q, 'es) result =
+      | Value : 'a @@ global many -> ('a, 'p, 'q, 'es) result
+      | Exception : exn @@ global many -> ('a, 'p, 'q, 'es) result
+      | Operation :
+          ('o, 'p, 'q, ('p, 'q) t) ops @@ c_arg global many
+          * ('o, ('a, 'p, 'q, 'es) result, 'es) Continuation.t @@ p_res
+          -> ('a, 'p, 'q, 'es) result
+      (** [('a, 'p, 'q, 'es) t] is the result of running a continuation until it either
+          finishes and returns an ['a] value, raises an exception, or performs an
+          operation. *)
+
+    include
+      S2_generic
+      [@mode p_arg p_res]
+      with type ('p, 'q) t := ('p, 'q) t
+       and type ('a, 'p, 'q, 'e) ops := ('a, 'p, 'q, 'e) ops
+       and type ('a, 'p, 'q, 'es) result := ('a, 'p, 'q, 'es) result
+
+    module Result : sig @@ portable
+      type ('a, 'p, 'q, 'es) t = ('a, 'p, 'q, 'es) result
     end
   end
 
@@ -278,48 +287,25 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
         [('p, 'q) t] to tie the knot on recursive operations. *)
     type ('a, 'p, 'q, 'e) ops
 
-    type ('a, 'p, 'q, 'es) result =
-      | Value : 'a @@ aliased global many -> ('a, 'p, 'q, 'es) result
-      | Exception : exn @@ aliased global many -> ('a, 'p, 'q, 'es) result
-      | Operation :
-          ('o, 'p, 'q, ('p, 'q) t) ops @@ aliased global many
-          * ('o, ('a, 'p, 'q, 'es) result, 'es) Continuation.t
-          -> ('a, 'p, 'q, 'es) result
-      (** [('a, 'p, 'q, 'es) t] is the result of running a continuation until it either
-          finishes and returns an ['a] value, raises an exception, or performs an
-          operation. *)
-
     include
-      S2_generic
+      S2_base
       with type ('p, 'q) t := ('p, 'q) t
        and type ('a, 'p, 'q, 'e) ops := ('a, 'p, 'q, 'e) ops
-       and type ('a, 'p, 'q, 'es) result := ('a, 'p, 'q, 'es) result
-
-    module Result : sig @@ portable
-      type ('a, 'p, 'q, 'es) t = ('a, 'p, 'q, 'es) result
-    end
 
     module Contended : sig @@ portable
-      type ('a, 'p, 'q, 'es) result =
-        | Value : 'a @@ aliased global many -> ('a, 'p, 'q, 'es) result
-        | Exception : exn @@ aliased global many -> ('a, 'p, 'q, 'es) result
-        | Operation :
-            ('o, 'p, 'q, ('p, 'q) t) ops @@ aliased contended global many
-            * ('o Modes.Portable.t, ('a, 'p, 'q, 'es) result, 'es) Continuation.t
-            -> ('a, 'p, 'q, 'es) result
-        (** [('a, 'p, 'q, 'es) t] is the result of running a continuation until it either
-            finishes and returns an ['a] value, raises an exception, or performs an
-            operation. *)
-
       include
-        S2_generic_contended
+        S2_base
+        [@mode portable nonportable]
         with type ('p, 'q) t := ('p, 'q) t
          and type ('a, 'p, 'q, 'e) ops := ('a, 'p, 'q, 'e) ops
-         and type ('a, 'p, 'q, 'es) result := ('a, 'p, 'q, 'es) result
+    end
 
-      module Result : sig
-        type ('a, 'p, 'q, 'es) t = ('a, 'p, 'q, 'es) result
-      end
+    module Portable : sig @@ portable
+      include
+        S2_base
+        [@mode portable portable]
+        with type ('p, 'q) t := ('p, 'q) t
+         and type ('a, 'p, 'q, 'e) ops := ('a, 'p, 'q, 'e) ops
     end
 
     module Handler : sig
@@ -356,7 +342,7 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
   end
 end
 
-module type Effect = sig @@ portable
+module type Handled_effect = sig @@ portable
   module Handler : Handler
   module Continuation : Continuation
 

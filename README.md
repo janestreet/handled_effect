@@ -1,4 +1,4 @@
-# Handled algebraic effects for OxCaml
+# Typed algebraic effects for OxCaml
 
 OCaml 5 introduced *effect handlers* - a mechanism for modular programming
 with user-defined *algebraic effects*. Effect handlers allow programmers to describe
@@ -24,8 +24,3 @@ val catch : f:(ExnHandler.t @ local -> 'a) @ local -> 'a option
 
 let divide_by_list m ns = catch ~f:(fun h -> map ns ~f:(fun n -> divide h m n))
 ```
-
-This library provides a safe interface to algebraic effects in OxCaml using `local`.
-The API, accessible [here](https://github.com/janestreet/oxcaml_effect/blob/with-extensions/src/effect_intf.ml),
-is experimental and does not constitute a finished design.
-For a formal background, view our [paper](https://lpw25.net/papers/popl2026.pdf).
