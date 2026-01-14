@@ -1,14 +1,22 @@
-include Effect_intf
+include Handled_effect_intf
 
 module Obj = struct
   include Stdlib.Obj
   include Basement.Stdlib_shim.Obj
 
   external magic_at_unique : 'a -> 'b = "%identity"
-  external magic_portable_at_unique : 'a -> 'a = "%identity"
+  external magic_at_unique_once : 'a -> 'b = "%identity"
+  external magic_portable_at_unique_once : 'a -> 'a = "%identity"
+  external magic_uncontended_at_unique_once : 'a -> 'a = "%identity"
 end
 
-module Modes = Base.Modes
+module Modes = struct
+  include Base.Modes
+
+  module Many_aliased = struct
+    type 'a t = { many_aliased : 'a }
+  end
+end
 
 module Handler_index : sig
   (** [(es1, es2) t] represents an index into the effect list [es2]. [es1] is the tail
@@ -293,15 +301,20 @@ end = struct
 end
 
 type ('a, 'e) op
-type ('a, 'e) perform = ('a, 'e) op * 'e Handler.t'
 
-(* [perform_] is able to return a unique value because [continue] is required
-   to provide a unique value. *)
+type ('a, 'e) perform =
+  (* It is important that this tuple is in this order! This type has to be [Obj.magic]able
+     from Stdlib.Effect, or else throwing a stdlib effect past an oxcaml handler can cause
+     a segfault. Locality prevents the inverse from happening. *)
+  'e Handler.t' * ('a, 'e) op
+
+(* [perform_] is able to return a unique value because [continue] is required to provide a
+   unique value. *)
 external perform_ : ('a, 'e) perform -> 'a = "%perform"
 
-(* A last_fiber is a tagged pointer, so does not keep the fiber alive.
-   It must never be the sole reference to the fiber, and is only used to cache
-   the final fiber in the linked list formed by [cont.fiber->parent]. *)
+(* A last_fiber is a tagged pointer, so does not keep the fiber alive. It must never be
+   the sole reference to the fiber, and is only used to cache the final fiber in the
+   linked list formed by [cont.fiber->parent]. *)
 type last_fiber [@@immediate]
 type (-'a, +'b) cont
 
@@ -322,8 +335,8 @@ type 'b effc = { effc : 'o 'e. ('o, 'e) perform -> ('o, 'b) cont -> last_fiber -
 [@@unboxed]
 
 module Must_not_enter_gc = struct
-  (* Stacks are represented as tagged pointers, so do not keep the fiber alive.
-     We must not enter the GC between the creation and use of a [stack]. *)
+  (* Stacks are represented as tagged pointers, so do not keep the fiber alive. We must
+     not enter the GC between the creation and use of a [stack]. *)
   type (-'a, +'b) stack [@@immediate]
 
   external alloc_stack
@@ -345,17 +358,17 @@ module Must_not_enter_gc = struct
 
   let is_runtime5 () = Basement.Stdlib_shim.runtime5 ()
 
-  (* Allocate a stack and immediately run [f x] using that stack.
-     We must not enter the GC between [alloc_stack] and [runstack].
-     [with_stack] is marked as [@inline never] to avoid reordering. *)
+  (* Allocate a stack and immediately run [f x] using that stack. We must not enter the GC
+     between [alloc_stack] and [runstack]. [with_stack] is marked as [@inline never] to
+     avoid reordering. *)
   let[@inline never] with_stack valuec exnc effc f x =
     if not (is_runtime5 ()) then failwith "Effects require the OCaml 5 runtime.";
     runstack (alloc_stack valuec exnc effc) f x
   ;;
 
-  (* Retrieve the stack from a [cont]inuation and run [f x] using it.
-     We must not enter the GC between [take_cont_noexc] and [resume].
-     [with_cont] is marked as [@inline never] to avoid reordering. *)
+  (* Retrieve the stack from a [cont]inuation and run [f x] using it. We must not enter
+     the GC between [take_cont_noexc] and [resume]. [with_cont] is marked as
+     [@inline never] to avoid reordering. *)
   let[@inline never] with_cont cont f x =
     if not (is_runtime5 ()) then failwith "Effects require the OCaml 5 runtime.";
     let fiber, cont = borrow (fun k -> cont_last_fiber k) cont in
@@ -385,7 +398,7 @@ let alloc_cont
   let exception Ready__ of (a, (b, e * es) r) cont in
   let effc
     (type o eh)
-    ((op, h) as perf : (o, eh) perform)
+    ((h, op) as perf : (o, eh) perform)
     (k : (o, (b, e * es) r) cont)
     last_fiber
     =
@@ -399,14 +412,13 @@ let alloc_cont
     | _ -> reperform perf k last_fiber
   in
   let dummy_op : (a, e) op = Obj.magic () in
-  let p = dummy_op, Handler.Dummy in
+  let p = Handler.Dummy, dummy_op in
   match
     Must_not_enter_gc.with_stack valuec exnc { effc } (fun () -> f h (perform_ p)) ()
   with
   | _ -> assert false
-  (* [Ready__ k] is only ever raised once with an unique [k]. However,
-     raised exceptions must have the legacy mode, so we can't get rid
-     of [magic_unique] here. *)
+  (* [Ready__ k] is only ever raised once with an unique [k]. However, raised exceptions
+     must have the legacy mode, so we can't get rid of [magic_unique] here. *)
   | exception Ready__ k -> Obj.magic_unique k
 ;;
 
@@ -417,7 +429,7 @@ let run_stack
   (h : h)
   : (a, e * es) r
   =
-  let effc ((op, h) as perf) k last_fiber =
+  let effc ((h, op) as perf) k last_fiber =
     match h with
     | H.C h -> Op (op, h, k, last_fiber)
     | _ -> reperform perf k last_fiber
@@ -431,6 +443,7 @@ type (-'a, +'b, 'e, 'es) continuation =
       ; mapping : 'es Mapping.t
       }
       -> ('a, 'b, 'e, 'es) continuation
+[@@unsafe_allow_any_mode_crossing "CR layouts v2.8: GADT mode crossing"]
 
 type ('a, 'e, 'es) res =
   | Value : 'a -> ('a, 'e, 'es) res
@@ -457,7 +470,7 @@ let rec handle : type a e es. es Mapping.t -> (a, e * es) r -> (a, e, es) res =
        let handler = Raw_handler.weaken handler in
        let fwd = Mapping.lookup handler mapping in
        (* the bytecode compiler requires [reperform] to be in tail position *)
-       let result = (fun () -> reperform (op, fwd.h) k last_fiber) () in
+       let result = (fun () -> reperform (fwd.h, op) k last_fiber) () in
        handle mapping result)
 ;;
 
@@ -467,10 +480,21 @@ let resume (Cont { cont; mapping }) f x handlers =
 ;;
 
 let continue k v hs = resume k (fun x -> x) v hs
-let discontinue k e hs = resume k (fun e -> raise e) e hs
+
+let discontinue k e hs =
+  resume
+    k
+    (fun { Modes.Many_aliased.many_aliased = e } -> raise e)
+    { many_aliased = e }
+    hs
+;;
 
 let discontinue_with_backtrace k e bt hs =
-  resume k (fun e -> Printexc.raise_with_backtrace e bt) e hs
+  resume
+    k
+    (fun { Modes.Many_aliased.many_aliased = e } -> Printexc.raise_with_backtrace e bt)
+    { many_aliased = e }
+    hs
 ;;
 
 let fiber (type a b e) (f : e Handler.t -> a -> b) =
@@ -520,12 +544,61 @@ let run_with (type a e es) (hs : es Handler.List.t) (f : (e * es) Handler.List.t
 
 (* Data-race-free wrappers around [fiber]/[run] functions.
 
-   Uses [Obj.magic_portable] to avoid duplicating implementations
-   of [alloc_cont]/[run_stack] in absence of mode polymorphism.
+   Uses [Obj.magic_portable] to avoid duplicating implementations of
+   [alloc_cont]/[run_stack] in absence of mode polymorphism.
 
-   Wrappers provide the handler at [portable], but require [portable]
-   arguments and operations, which are marked as [contended]. *)
+   Wrappers provide the handler at [portable], but require [portable] arguments and
+   operations, which are marked as [contended]. *)
 module DRF : sig
+  val fiber : 'a 'b 'e. ('e Handler.t -> 'a -> 'b) -> ('a, 'b, 'e, unit) continuation
+
+  val fiber_with
+    : 'a 'b 'e 'es.
+    'es Handler.List.Length.t
+    -> (('e * 'es) Handler.List.t -> 'a -> 'b)
+    -> ('a, 'b, 'e, 'es) continuation
+
+  val run : ('e Handler.t -> 'a) -> ('a, 'e, unit) res
+
+  (* Returns a [res] to be [Obj.magic]ed into the contended result type with
+     [op @@ contended]. *)
+
+  val run_with
+    :  'es Handler.List.t
+    -> (('e * 'es) Handler.List.t -> 'a)
+    -> ('a, 'e, 'es) res
+
+  (* Returns a [res] to be [Obj.magic]ed into the contended result type with
+     [op @@ contended]. *)
+end = struct
+  let[@inline] fiber f =
+    let f h a =
+      f (Obj.magic_portable h) (Obj.magic_portable_at_unique_once a) [@nontail]
+    in
+    let k : ('a, 'b, 'e, unit) continuation = Obj.magic_at_unique (fiber f) in
+    k
+  ;;
+
+  let[@inline] fiber_with hs f =
+    let f hs a =
+      f (Obj.magic_portable hs) (Obj.magic_portable_at_unique_once a) [@nontail]
+    in
+    let k : ('a, 'b, 'e, 'es) continuation = Obj.magic_at_unique (fiber_with hs f) in
+    k
+  ;;
+
+  let[@inline] run f =
+    let f h = f (Obj.magic_portable h) [@nontail] in
+    run f
+  ;;
+
+  let[@inline] run_with hs f =
+    let f hs = f (Obj.magic_portable hs) [@nontail] in
+    run_with hs f
+  ;;
+end
+
+module DRF_portable : sig
   val fiber : 'a 'b 'e. ('e Handler.t -> 'a -> 'b) -> ('a, 'b, 'e, unit) continuation
 
   val fiber_with
@@ -542,15 +615,25 @@ module DRF : sig
     -> ('a, 'e, 'es) res
 end = struct
   let[@inline] fiber f =
-    let f h a = f (Obj.magic_portable h) (Obj.magic_portable_at_unique a) [@nontail] in
+    let f h a =
+      f
+        (Obj.magic_portable h)
+        (Obj.magic_portable_at_unique_once (Obj.magic_uncontended_at_unique_once a))
+      [@nontail]
+    in
     let k : ('a, 'b, 'e, unit) continuation = Obj.magic_at_unique (fiber f) in
-    k
+    Obj.magic_portable_at_unique_once k
   ;;
 
   let[@inline] fiber_with hs f =
-    let f hs a = f (Obj.magic_portable hs) (Obj.magic_portable_at_unique a) [@nontail] in
+    let f hs a =
+      f
+        (Obj.magic_portable hs)
+        (Obj.magic_portable_at_unique_once (Obj.magic_uncontended_at_unique_once a))
+      [@nontail]
+    in
     let k : ('a, 'b, 'e, 'es) continuation = Obj.magic_at_unique (fiber_with hs f) in
-    k
+    Obj.magic_portable_at_unique_once k
   ;;
 
   let[@inline] run f =
@@ -560,7 +643,7 @@ end = struct
 
   let[@inline] run_with hs f =
     let f hs = f (Obj.magic_portable hs) [@nontail] in
-    run_with hs f
+    run_with (Obj.magic_uncontended hs) f [@nontail]
   ;;
 end
 
@@ -568,8 +651,8 @@ module Continuation = struct
   type (-'a, +'b, 'es) t =
     | Continuation : ('a, 'c, 'e, 'es) continuation -> ('a, 'b, 'es) t
   [@@unsafe_allow_any_mode_crossing "Only accesses mutable data uniquely. "] [@@unboxed]
-  (* This type has an unexpressible constraint that ['b] is a type that
-     can safely be [Obj.magic]ed from [(c, e, es) res] *)
+  (* This type has an unexpressible constraint that ['b] is a type that can safely be
+     [Obj.magic]ed from [(c, e, es) res] *)
 
   let get_callstack (Continuation cont) i =
     let bt, cont = get_callstack cont i in
@@ -581,105 +664,174 @@ let continue (type a b es) (k : (a, b, es) Continuation.t) v hs =
   let (Continuation (type e c) (cont : (a, c, e, es) continuation)) = k in
   let res : (c, e, es) res = continue cont v hs in
   (* Sound per the constraint on [Continuation.t]. *)
-  (Obj.magic_at_unique res : b)
+  (Obj.magic_at_unique_once res : b)
 ;;
 
 let discontinue (type a b es) (k : (a, b, es) Continuation.t) e hs =
   let (Continuation (type e c) (cont : (a, c, e, es) continuation)) = k in
   let res : (c, e, es) res = discontinue cont e hs in
   (* Sound per the constraint on [Continuation.t]. *)
-  (Obj.magic_at_unique res : b)
+  (Obj.magic_at_unique_once res : b)
 ;;
 
 let discontinue_with_backtrace (type a b es) (k : (a, b, es) Continuation.t) e bt hs =
   let (Continuation (type e c) (cont : (a, c, e, es) continuation)) = k in
   let res : (c, e, es) res = discontinue_with_backtrace cont e bt hs in
   (* Sound per the constraint on [Continuation.t]. *)
-  (Obj.magic_at_unique res : b)
+  (Obj.magic_at_unique_once res : b)
 ;;
 
-include Effect_intf.Definitions (Handler) (Continuation)
+include Handled_effect_intf.Definitions (Handler) (Continuation)
+
+module Make_generic (Types : sig
+    type ('p, 'q) t
+    type ('a, 'p, 'q, 'e) ops
+    type ('a, 'p, 'q, 'es) result
+  end) :
+  S2_generic
+  with type ('p, 'q) t := ('p, 'q) Types.t
+   and type ('a, 'p, 'q, 'e) ops := ('a, 'p, 'q, 'e) Types.ops
+   and type ('a, 'p, 'q, 'es) result := ('a, 'p, 'q, 'es) Types.result = struct
+  include Types
+
+  let fiber f = Continuation.Continuation (fiber f)
+  let fiber_with hs f = Continuation.Continuation (fiber_with hs f)
+
+  let run (type a p q) f =
+    let res : (a, (p, q) t, unit) res = run f in
+    (Obj.magic_at_unique_once res : (a, p, q, unit) result)
+  ;;
+
+  let run_with (type a p q es) hs f =
+    let res : (a, (p, q) t, es) res = run_with hs f in
+    (Obj.magic_at_unique_once res : (a, p, q, es) result)
+  ;;
+
+  let perform (type a p q) (h : _ Handler.t) (op : (a, p, q, (p, q) t) ops) =
+    let op : (a, (p, q) t) op = Obj.magic op in
+    perform_ (h.h, op)
+  ;;
+end
+
+module Make_generic_contended (Types : sig
+    type ('p, 'q) t
+    type ('a, 'p, 'q, 'e) ops
+    type ('a, 'p, 'q, 'es) result
+  end) :
+  S2_generic
+  [@mode portable nonportable]
+  with type ('p, 'q) t := ('p, 'q) Types.t
+   and type ('a, 'p, 'q, 'e) ops := ('a, 'p, 'q, 'e) Types.ops
+   and type ('a, 'p, 'q, 'es) result := ('a, 'p, 'q, 'es) Types.result = struct
+  include Types
+
+  let fiber f = Continuation.Continuation (DRF.fiber f)
+  let fiber_with l f = Continuation.Continuation (DRF.fiber_with l f)
+
+  let run (type a p q) f =
+    let res : (a, (p, q) t, unit) res = DRF.run f in
+    (Obj.magic_at_unique_once res : (a, p, q, unit) result)
+  ;;
+
+  let run_with (type a p q es) hs f =
+    let res : (a, (p, q) t, es) res = DRF.run_with hs f in
+    (Obj.magic_at_unique_once res : (a, p, q, es) result)
+  ;;
+
+  let perform (type a p q) (h : _ Handler.t) op : a =
+    let op : (a, (p, q) t) op = Obj.magic op in
+    (* Here and below, [magic_uncontended] is safe since the handler is either portable or
+       is executed in its original capsule. *)
+    perform_ (Obj.magic_uncontended h.h, op)
+  ;;
+end
+
+module Make_generic_portable (Types : sig
+    type ('p, 'q) t
+    type ('a, 'p, 'q, 'e) ops
+    type ('a, 'p, 'q, 'es) result
+  end) :
+  S2_generic
+  [@mode portable portable]
+  with type ('p, 'q) t := ('p, 'q) Types.t
+   and type ('a, 'p, 'q, 'e) ops := ('a, 'p, 'q, 'e) Types.ops
+   and type ('a, 'p, 'q, 'es) result := ('a, 'p, 'q, 'es) Types.result = struct
+  include Types
+
+  let fiber f = Continuation.Continuation (DRF_portable.fiber f)
+  let fiber_with l f = Continuation.Continuation (DRF_portable.fiber_with l f)
+
+  let run (type a p q) f =
+    let res : (a, (p, q) t, unit) res = DRF_portable.run f in
+    (Obj.magic_at_unique_once res : (a, p, q, unit) result)
+  ;;
+
+  let run_with (type a p q es) hs f =
+    let res : (a, (p, q) t, es) res = DRF_portable.run_with hs f in
+    (Obj.magic_at_unique_once res : (a, p, q, es) result)
+  ;;
+
+  let perform (type a p q) (h : _ Handler.t) (op : (a, p, q, (p, q) t) ops) =
+    let op : (a, (p, q) t) op = Obj.magic op in
+    perform_ (Obj.magic_uncontended h.h, op)
+  ;;
+end
+
+module%template
+  [@mode
+    (p_arg, c_arg) = ((nonportable, uncontended), (portable, contended))
+    , (p_res, c_res) = ((nonportable, uncontended), (portable, contended))] Make_rec_base
+    (T : sig
+       type t
+     end)
+    (Ops : Operations_rec) =
+struct
+  type ('a, 'es) result =
+    | Value : 'a -> ('a, 'es) result
+    | Exception : exn -> ('a, 'es) result
+    | Operation :
+        ('o, T.t) Ops.t * ('o, ('a, 'es) result, 'es) Continuation.t
+        -> ('a, 'es) result
+
+  module Result = struct
+    type ('a, 'es) t = ('a, 'es) result
+  end
+end
 
 module Make_rec (Ops : Operations_rec) : S with type ('a, 'e) ops := ('a, 'e) Ops.t =
 struct
   type t
 
-  module Result = struct
-    type eff = t
-
-    type ('e, 'es) t =
-      | Value : 'a -> ('a, 'es) t
-      | Exception : exn -> ('a, 'es) t
-      | Operation : ('o, eff) Ops.t * ('o, ('a, 'es) t, 'es) Continuation.t -> ('a, 'es) t
-
-    type ('a, 'es) handler =
-      { handle : 'o. ('o, eff) Ops.t -> ('o, ('a, 'es) t, 'es) Continuation.t -> 'a }
-    [@@unboxed]
-
-    let handle r { handle } =
-      match r with
-      | Value x -> x
-      | Exception e -> raise e
-      | Operation (op, k) -> handle op k
-    ;;
+  module T = struct
+    type nonrec t = t
   end
 
-  type ('a, 'es) result = ('a, 'es) Result.t =
-    | Value : 'a -> ('a, 'es) result
-    | Exception : exn -> ('a, 'es) result
-    | Operation :
-        ('o, t) Ops.t * ('o, ('a, 'es) result, 'es) Continuation.t
-        -> ('a, 'es) result
+  include Make_rec_base (T) (Ops)
 
-  let fiber f = Continuation.Continuation (fiber f)
-  let fiber_with hs f = Continuation.Continuation (fiber_with hs f)
-
-  let run (type a) f =
-    let res : (a, t, unit) res = run f in
-    (Obj.magic_at_unique res : (a, unit) Result.t)
-  ;;
-
-  let run_with (type a es) hs f =
-    let res : (a, t, es) res = run_with hs f in
-    (Obj.magic_at_unique res : (a, es) Result.t)
-  ;;
-
-  let perform (type a) (h : _ Handler.t) (op : (a, t) Ops.t) =
-    let op : (a, t) op = Obj.magic op in
-    perform_ (op, h.h)
-  ;;
+  include Make_generic (struct
+      type nonrec (_, _) t = t
+      type nonrec ('a, _, _, 'e) ops = ('a, 'e) Ops.t
+      type nonrec ('a, _, _, 'es) result = ('a, 'es) result
+    end)
 
   module Contended = struct
-    module Result = struct
-      type eff = t
+    include Make_rec_base [@mode portable nonportable] (T) (Ops)
 
-      type ('a, 'es) t =
-        | Value : 'a -> ('a, 'es) t
-        | Exception : exn -> ('a, 'es) t
-        | Operation :
-            ('o, eff) Ops.t * ('o Modes.Portable.t, ('a, 'es) t, 'es) Continuation.t
-            -> ('a, 'es) t
-    end
+    include Make_generic_contended (struct
+        type nonrec (_, _) t = t
+        type nonrec ('a, _, _, 'e) ops = ('a, 'e) Ops.t
+        type nonrec ('a, _, _, 'es) result = ('a, 'es) result
+      end)
+  end
 
-    let fiber f = Continuation.Continuation (DRF.fiber f)
-    let fiber_with l f = Continuation.Continuation (DRF.fiber_with l f)
+  module Portable = struct
+    include Make_rec_base [@mode portable portable] (T) (Ops)
 
-    let run (type a) f =
-      let res : (a, t, unit) res = DRF.run f in
-      (Obj.magic_at_unique res : (a, unit) Result.t)
-    ;;
-
-    let run_with (type a es) hs f =
-      let res : (a, t, es) res = DRF.run_with hs f in
-      (Obj.magic_at_unique res : (a, es) Result.t)
-    ;;
-
-    let perform (type a) (h : t Handler.t) op : a =
-      let op : (a, t) op = Obj.magic op in
-      (* Here and below, [magic_uncontended] is safe since the handler
-         is either portable or is executed in its original capsule. *)
-      perform_ (op, Obj.magic_uncontended h.h)
-    ;;
+    include Make_generic_portable (struct
+        type nonrec (_, _) t = t
+        type nonrec ('a, _, _, 'e) ops = ('a, 'e) Ops.t
+        type nonrec ('a, _, _, 'es) result = ('a, 'es) result
+      end)
   end
 
   module Handler = struct
@@ -687,7 +839,7 @@ struct
   end
 
   module Continuation = struct
-    type ('a, 'b, 'es) t = ('a, ('b, 'es) Result.t, 'es) Continuation.t
+    type ('a, 'b, 'es) t = ('a, ('b, 'es) result, 'es) Continuation.t
   end
 end
 
@@ -695,89 +847,61 @@ module Make (Ops : Operations) : S with type ('a, 'e) ops := 'a Ops.t = Make_rec
     type ('a, 'e) t = 'a Ops.t
   end)
 
+module%template
+  [@mode
+    (p_arg, c_arg) = ((nonportable, uncontended), (portable, contended))
+    , (p_res, c_res) = ((nonportable, uncontended), (portable, contended))] Make1_rec_base
+    (T : sig
+       type 'p t
+     end)
+    (Ops : Operations1_rec) =
+struct
+  type ('a, 'p, 'es) result =
+    | Value : 'a -> ('a, 'p, 'es) result
+    | Exception : exn -> ('a, 'p, 'es) result
+    | Operation :
+        ('o, 'p, 'p T.t) Ops.t * ('o, ('a, 'p, 'es) result, 'es) Continuation.t
+        -> ('a, 'p, 'es) result
+
+  module Result = struct
+    type ('a, 'p, 'es) t = ('a, 'p, 'es) result
+  end
+end
+
 module Make1_rec (Ops : Operations1_rec) :
   S1 with type ('a, 'p, 'e) ops := ('a, 'p, 'e) Ops.t = struct
   type 'p t
 
-  module Result = struct
-    type 'p eff = 'p t
-
-    type ('a, 'p, 'es) t =
-      | Value : 'a -> ('a, 'p, 'es) t
-      | Exception : exn -> ('a, 'p, 'es) t
-      | Operation :
-          ('o, 'p, 'p eff) Ops.t * ('o, ('a, 'p, 'es) t, 'es) Continuation.t
-          -> ('a, 'p, 'es) t
-
-    type ('a, 'p, 'es) handler =
-      { handle :
-          'o. ('o, 'p, 'p eff) Ops.t -> ('o, ('a, 'p, 'es) t, 'es) Continuation.t -> 'a
-      }
-    [@@unboxed]
-
-    let handle r { handle } =
-      match r with
-      | Value x -> x
-      | Exception e -> raise e
-      | Operation (op, k) -> handle op k
-    ;;
+  module T = struct
+    type nonrec 'p t = 'p t
   end
 
-  type ('a, 'p, 'es) result = ('a, 'p, 'es) Result.t =
-    | Value : 'a -> ('a, 'p, 'es) result
-    | Exception : exn -> ('a, 'p, 'es) result
-    | Operation :
-        ('o, 'p, 'p t) Ops.t * ('o, ('a, 'p, 'es) result, 'es) Continuation.t
-        -> ('a, 'p, 'es) result
+  include Make1_rec_base (T) (Ops)
 
-  let fiber f = Continuation.Continuation (fiber f)
-  let fiber_with hs f = Continuation.Continuation (fiber_with hs f)
-
-  let run (type a p) f =
-    let res : (a, p t, unit) res = run f in
-    (Obj.magic_at_unique res : (a, p, unit) Result.t)
-  ;;
-
-  let run_with (type a p es) hs f =
-    let res : (a, p t, es) res = run_with hs f in
-    (Obj.magic_at_unique res : (a, p, es) Result.t)
-  ;;
-
-  let perform (type a p) (h : _ Handler.t) (op : (a, p, p t) Ops.t) =
-    let op : (a, p t) op = Obj.magic op in
-    perform_ (op, h.h)
-  ;;
+  include Make_generic (struct
+      type nonrec ('p, _) t = 'p t
+      type nonrec ('a, 'p, _, 'e) ops = ('a, 'p, 'e) Ops.t
+      type nonrec ('a, 'p, _, 'es) result = ('a, 'p, 'es) result
+    end)
 
   module Contended = struct
-    module Result = struct
-      type 'p eff = 'p t
+    include Make1_rec_base [@mode portable nonportable] (T) (Ops)
 
-      type ('a, 'p, 'es) t =
-        | Value : 'a -> ('a, 'p, 'es) t
-        | Exception : exn -> ('a, 'p, 'es) t
-        | Operation :
-            ('o, 'p, 'p eff) Ops.t
-            * ('o Modes.Portable.t, ('a, 'p, 'es) t, 'es) Continuation.t
-            -> ('a, 'p, 'es) t
-    end
+    include Make_generic_contended (struct
+        type nonrec ('p, _) t = 'p t
+        type nonrec ('a, 'p, _, 'e) ops = ('a, 'p, 'e) Ops.t
+        type nonrec ('a, 'p, _, 'es) result = ('a, 'p, 'es) result
+      end)
+  end
 
-    let fiber f = Continuation.Continuation (DRF.fiber f)
-    let fiber_with l f = Continuation.Continuation (DRF.fiber_with l f)
+  module Portable = struct
+    include Make1_rec_base [@mode portable portable] (T) (Ops)
 
-    let run (type a p) f =
-      let res : (a, p t, unit) res = DRF.run f in
-      (Obj.magic_at_unique res : (a, p, unit) Result.t)
-    ;;
-
-    let run_with (type a p es) hs f =
-      let res : (a, p t, es) res = DRF.run_with hs f in
-      (Obj.magic_at_unique res : (a, p, es) Result.t)
-    ;;
-
-    let perform (type a p) (h : p t Handler.t) op : a =
-      let op : (a, p t) op = Obj.magic op in
-      perform_ (op, Obj.magic_uncontended h.h)
-    ;;
+    include Make_generic_portable (struct
+        type nonrec ('p, _) t = 'p t
+        type nonrec ('a, 'p, _, 'e) ops = ('a, 'p, 'e) Ops.t
+        type nonrec ('a, 'p, _, 'es) result = ('a, 'p, 'es) result
+      end)
   end
 
   module Handler = struct
@@ -785,7 +909,7 @@ module Make1_rec (Ops : Operations1_rec) :
   end
 
   module Continuation = struct
-    type ('a, 'b, 'p, 'es) t = ('a, ('b, 'p, 'es) Result.t, 'es) Continuation.t
+    type ('a, 'b, 'p, 'es) t = ('a, ('b, 'p, 'es) result, 'es) Continuation.t
   end
 end
 
@@ -794,93 +918,62 @@ Make1_rec (struct
     type ('a, 'p, 'e) t = ('a, 'p) Ops.t
   end)
 
+module%template
+  [@mode
+    (p_arg, c_arg) = ((nonportable, uncontended), (portable, contended))
+    , (p_res, c_res) = ((nonportable, uncontended), (portable, contended))] Make2_rec_base
+    (T : sig
+       type ('p, 'q) t
+     end)
+    (Ops : Operations2_rec) =
+struct
+  type ('a, 'p, 'q, 'es) result =
+    | Value : 'a -> ('a, 'p, 'q, 'es) result
+    | Exception : exn -> ('a, 'p, 'q, 'es) result
+    | Operation :
+        ('o, 'p, 'q, ('p, 'q) T.t) Ops.t
+        * ('o, ('a, 'p, 'q, 'es) result, 'es) Continuation.t
+        -> ('a, 'p, 'q, 'es) result
+
+  module Result = struct
+    type ('a, 'p, 'q, 'es) t = ('a, 'p, 'q, 'es) result
+  end
+end
+
 module Make2_rec (Ops : Operations2_rec) :
   S2 with type ('a, 'p, 'q, 'e) ops := ('a, 'p, 'q, 'e) Ops.t = struct
   type ('p, 'q) t
 
-  module Result = struct
-    type ('p, 'q) eff = ('p, 'q) t
-
-    type ('a, 'p, 'q, 'es) t =
-      | Value : 'a -> ('a, 'p, 'q, 'es) t
-      | Exception : exn -> ('a, 'p, 'q, 'es) t
-      | Operation :
-          ('o, 'p, 'q, ('p, 'q) eff) Ops.t * ('o, ('a, 'p, 'q, 'es) t, 'es) Continuation.t
-          -> ('a, 'p, 'q, 'es) t
-
-    type ('a, 'p, 'q, 'es) handler =
-      { handle :
-          'o.
-          ('o, 'p, 'q, ('p, 'q) eff) Ops.t
-          -> ('o, ('a, 'p, 'q, 'es) t, 'es) Continuation.t
-          -> 'a
-      }
-    [@@unboxed]
-
-    let handle r { handle } =
-      match r with
-      | Value x -> x
-      | Exception e -> raise e
-      | Operation (op, k) -> handle op k
-    ;;
+  module T = struct
+    type nonrec ('p, 'q) t = ('p, 'q) t
   end
 
-  type ('a, 'p, 'q, 'es) result = ('a, 'p, 'q, 'es) Result.t =
-    | Value : 'a -> ('a, 'p, 'q, 'es) result
-    | Exception : exn -> ('a, 'p, 'q, 'es) result
-    | Operation :
-        ('o, 'p, 'q, ('p, 'q) t) Ops.t
-        * ('o, ('a, 'p, 'q, 'es) result, 'es) Continuation.t
-        -> ('a, 'p, 'q, 'es) result
+  include Make2_rec_base (T) (Ops)
 
-  let fiber f = Continuation.Continuation (fiber f)
-  let fiber_with hs f = Continuation.Continuation (fiber_with hs f)
-
-  let run (type a p q) f =
-    let res : (a, (p, q) t, unit) res = run f in
-    (Obj.magic_at_unique res : (a, p, q, unit) result)
-  ;;
-
-  let run_with (type a p q es) hs f =
-    let res : (a, (p, q) t, es) res = run_with hs f in
-    (Obj.magic_at_unique res : (a, p, q, es) result)
-  ;;
-
-  let perform (type a p q) (h : _ Handler.t) (op : (a, p, q, (p, q) t) Ops.t) =
-    let op : (a, (p, q) t) op = Obj.magic op in
-    perform_ (op, h.h)
-  ;;
+  include Make_generic (struct
+      type nonrec ('p, 'q) t = ('p, 'q) t
+      type nonrec ('a, 'p, 'q, 'e) ops = ('a, 'p, 'q, 'e) Ops.t
+      type nonrec ('a, 'p, 'q, 'es) result = ('a, 'p, 'q, 'es) result
+    end)
 
   module Contended = struct
-    module Result = struct
-      type ('p, 'q) eff = ('p, 'q) t
+    include Make2_rec_base [@mode portable nonportable] (T) (Ops)
 
-      type ('a, 'p, 'q, 'es) t =
-        | Value : 'a -> ('a, 'p, 'q, 'es) t
-        | Exception : exn -> ('a, 'p, 'q, 'es) t
-        | Operation :
-            ('o, 'p, 'q, ('p, 'q) eff) Ops.t
-            * ('o Modes.Portable.t, ('a, 'p, 'q, 'es) t, 'es) Continuation.t
-            -> ('a, 'p, 'q, 'es) t
-    end
+    include Make_generic_contended (struct
+        type nonrec ('p, 'q) t = ('p, 'q) t
+        type nonrec ('a, 'p, 'q, 'e) ops = ('a, 'p, 'q, 'e) Ops.t
+        type nonrec ('a, 'p, 'q, 'es) result = ('a, 'p, 'q, 'es) result
+      end)
+  end
 
-    let fiber f = Continuation.Continuation (DRF.fiber f)
-    let fiber_with l f = Continuation.Continuation (DRF.fiber_with l f)
+  module Portable = struct
+    include Make2_rec_base [@mode portable portable] (T) (Ops)
 
-    let run (type a p q) f =
-      let res : (a, (p, q) t, unit) res = DRF.run f in
-      (Obj.magic_at_unique res : (a, p, q, unit) Result.t)
-    ;;
-
-    let run_with (type a p q es) hs f =
-      let res : (a, (p, q) t, es) res = DRF.run_with hs f in
-      (Obj.magic_at_unique res : (a, p, q, es) Result.t)
-    ;;
-
-    let perform (type a p q) (h : (p, q) t Handler.t) op : a =
-      let op : (a, (p, q) t) op = Obj.magic op in
-      perform_ (op, Obj.magic_uncontended h.h)
-    ;;
+    include Make_generic_portable (struct
+        type nonrec ('p, 'q) t = ('p, 'q) t
+        type nonrec ('a, 'p, 'q, 'e) ops = ('a, 'p, 'q, 'e) Ops.t
+        type nonrec ('a, 'p, 'q, 'es) result = ('a, 'p, 'q, 'es) result
+      end)
   end
 
   module Handler = struct

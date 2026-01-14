@@ -1,5 +1,6 @@
 (library
- (name effect)
- (public_name oxcaml_effect)
+ (name handled_effect)
+ (public_name handled_effect)
  (libraries base basement)
- (preprocess no_preprocessing))
+ (preprocess
+  (pps ppx_template)))
