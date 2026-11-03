@@ -1,36 +1,38 @@
 open! Base
 
+module type Handler_list = sig
+  type 'e handler
+
+  type 'es t =
+    | [] : unit t
+    | ( :: ) : 'e handler * 'es t -> ('e * 'es) t
+    (** ['es t] is a typed list of [Handler.t]s *)
+
+  module Length : sig
+    type x = X
+
+    type 'es t =
+      | [] : unit t
+      | ( :: ) : x * 'es t -> ('e * 'es) t
+      (** ['es t] represents the length of a typed list of [Handler.t]s. It has slightly
+          unusual constructors so that lengths can be written as [[X; X; X]] rather than
+          e.g. [(S (S (S Z)))]. *)
+  end
+
+  (** [length hs] is the length of [hs] *)
+  val length : 'es t -> 'es Length.t
+end
+
 module type Handler = sig
   (** ['e t] is an effect handler for the effect ['e] on the current stack. *)
   type 'e t
 
-  module List : sig
-    type 'e handler := 'e t
-
-    type 'es t =
-      | [] : unit t
-      | ( :: ) : 'e handler * 'es t -> ('e * 'es) t
-      (** ['es t] is a typed list of [Handler.t]s *)
-
-    module Length : sig
-      type x = X
-
-      type 'es t =
-        | [] : unit t
-        | ( :: ) : x * 'es t -> ('e * 'es) t
-        (** ['es t] represents the length of a typed list of [Handler.t]s. It has slightly
-            unusual constructors so that lengths can be written as [[X; X; X]] rather than
-            e.g. [(S (S (S Z)))]. *)
-    end
-
-    (** [length hs] is the length of [hs] *)
-    val length : 'es t -> 'es Length.t
-  end
+  module List : Handler_list with type 'e handler := 'e t
 end
 
 module type Continuation = sig
-  (** [('a, 'b, 'es) continuation] is a delimited continuation that expects an ['a] value
-      and returns a ['b] value. It requires handlers for the effects ['es]. *)
+  (** [('a, 'b, 'es) Continuation.t] is a delimited continuation that expects an ['a]
+      value and returns a ['b] value. It requires handlers for the effects ['es]. *)
   type (-'a, +'b, 'es) t
 
   (** [get_callstack c n] returns a description of the top of the call stack on the
@@ -43,10 +45,7 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
 
       This is not a truly mode-polymorphic signature. Only select instances may be used,
       and each instance requires its specific result type for soundness. *)
-  module type%template
-    [@mode
-      (p_arg, c_arg) = ((nonportable, uncontended), (portable, contended))
-      , (p_res, c_res) = ((nonportable, uncontended), (portable, contended))] S2_generic = sig
+  module type S2_generic = sig
     (** [('p, 'q) t] represents the effect. It only appears as the argument to
         [Handler.t]. *)
     type ('p, 'q) t
@@ -56,9 +55,14 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
         [('p, 'q) t] to tie the knot on recursive operations. *)
     type ('a, 'p, 'q, 'e) ops
 
-    (** [('a, 'p, 'q, 'es) t] is the result of running a continuation until it either
+    (** [('a, 'p, 'q, 'es) result] is the result of running a continuation until it either
         finishes and returns an ['a] value, raises an exception, or performs an operation. *)
     type ('a, 'p, 'q, 'es) result
+
+    (** [('a, 'p, 'q, 'es) preemptible_result] is the result of running a continuation
+        until it finishes and returns an ['a] value, raises an exception, performs an
+        operation, or is preempted. *)
+    type ('a, 'p, 'q, 'es) preemptible_result
 
     (** [fiber f] constructs a continuation that runs the computation [f]. [f] is passed a
         [t Handler.t] so that it can perform operations from the effect [t]. *)
@@ -97,10 +101,7 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
   (** The signature for effects with no type parameters at a combination of modes.
 
       This is not a truly mode-polymorphic signature. Only select instances may be used. *)
-  module type%template
-    [@mode
-      (p_arg, c_arg) = ((nonportable, uncontended), (portable, contended))
-      , (p_res, c_res) = ((nonportable, uncontended), (portable, contended))] S_base = sig
+  module type S_base = sig
     type t
     type ('a, 'e) ops
 
@@ -113,13 +114,6 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
       (** [('a, 'es) t] is the result of running a continuation until it either finishes
           and returns an ['a] value, raises an exception, or performs an operation. *)
 
-    include
-      S2_generic
-      [@mode p_arg p_res]
-      with type (_, _) t := t
-       and type ('a, _, _, 'e) ops := ('a, 'e) ops
-       and type ('a, _, _, 'es) result := ('a, 'es) result
-
     module Result : sig
       type eff := t
 
@@ -130,6 +124,13 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
             ('o, eff) ops * ('o, ('a, 'es) result, 'es) Continuation.t
             -> ('a, 'es) t
     end
+
+    include
+      S2_generic
+      with type (_, _) t := t
+       and type ('a, _, _, 'e) ops := ('a, 'e) ops
+       and type ('a, _, _, 'es) result := ('a, 'es) result
+       and type ('a, _, _, 'es) preemptible_result := ('a, 'es) result
   end
 
   (** The signature for effects with no type parameters *)
@@ -144,19 +145,11 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
     include S_base with type t := t and type ('a, 'e) ops := ('a, 'e) ops
 
     module Contended : sig
-      include
-        S_base
-        [@mode portable nonportable]
-        with type t := t
-         and type ('a, 'e) ops := ('a, 'e) ops
+      include S_base with type t := t and type ('a, 'e) ops := ('a, 'e) ops
     end
 
     module Portable : sig
-      include
-        S_base
-        [@mode portable portable]
-        with type t := t
-         and type ('a, 'e) ops := ('a, 'e) ops
+      include S_base with type t := t and type ('a, 'e) ops := ('a, 'e) ops
     end
 
     module Handler : sig
@@ -171,10 +164,7 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
   (** The signature for effects with one type parameter at a combination of modes.
 
       This is not a truly mode-polymorphic signature. Only select instances may be used. *)
-  module type%template
-    [@mode
-      (p_arg, c_arg) = ((nonportable, uncontended), (portable, contended))
-      , (p_res, c_res) = ((nonportable, uncontended), (portable, contended))] S1_base = sig
+  module type S1_base = sig
     type 'p t
     type ('a, 'p, 'e) ops
 
@@ -188,13 +178,6 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
           finishes and returns an ['a] value, raises an exception, or performs an
           operation. *)
 
-    include
-      S2_generic
-      [@mode p_arg p_res]
-      with type ('p, _) t := 'p t
-       and type ('a, 'p, _, 'e) ops := ('a, 'p, 'e) ops
-       and type ('a, 'p, _, 'e) result := ('a, 'p, 'e) result
-
     module Result : sig
       type 'p eff := 'p t
 
@@ -205,6 +188,13 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
             ('o, 'p, 'p eff) ops * ('o, ('a, 'p, 'es) result, 'es) Continuation.t
             -> ('a, 'p, 'es) t
     end
+
+    include
+      S2_generic
+      with type ('p, _) t := 'p t
+       and type ('a, 'p, _, 'e) ops := ('a, 'p, 'e) ops
+       and type ('a, 'p, _, 'e) result := ('a, 'p, 'e) result
+       and type ('a, 'p, _, 'e) preemptible_result := ('a, 'p, 'e) result
   end
 
   (** The signature for effects with one type parameter *)
@@ -219,19 +209,11 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
     include S1_base with type 'p t := 'p t and type ('a, 'p, 'e) ops := ('a, 'p, 'e) ops
 
     module Contended : sig
-      include
-        S1_base
-        [@mode portable nonportable]
-        with type 'p t := 'p t
-         and type ('a, 'p, 'e) ops := ('a, 'p, 'e) ops
+      include S1_base with type 'p t := 'p t and type ('a, 'p, 'e) ops := ('a, 'p, 'e) ops
     end
 
     module Portable : sig
-      include
-        S1_base
-        [@mode portable portable]
-        with type 'p t := 'p t
-         and type ('a, 'p, 'e) ops := ('a, 'p, 'e) ops
+      include S1_base with type 'p t := 'p t and type ('a, 'p, 'e) ops := ('a, 'p, 'e) ops
     end
 
     module Handler : sig
@@ -246,10 +228,7 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
   (** The signature for effects with two type parameters at a combination of modes.
 
       This is not a truly mode-polymorphic signature. Only select instances may be used. *)
-  module type%template
-    [@mode
-      (p_arg, c_arg) = ((nonportable, uncontended), (portable, contended))
-      , (p_res, c_res) = ((nonportable, uncontended), (portable, contended))] S2_base = sig
+  module type S2_base = sig
     type ('p, 'q) t
     type ('a, 'p, 'q, 'e) ops
 
@@ -264,13 +243,6 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
           finishes and returns an ['a] value, raises an exception, or performs an
           operation. *)
 
-    include
-      S2_generic
-      [@mode p_arg p_res]
-      with type ('p, 'q) t := ('p, 'q) t
-       and type ('a, 'p, 'q, 'e) ops := ('a, 'p, 'q, 'e) ops
-       and type ('a, 'p, 'q, 'es) result := ('a, 'p, 'q, 'es) result
-
     module Result : sig
       type ('p, 'q) eff := ('p, 'q) t
 
@@ -282,6 +254,13 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
             * ('o, ('a, 'p, 'q, 'es) result, 'es) Continuation.t
             -> ('a, 'p, 'q, 'es) t
     end
+
+    include
+      S2_generic
+      with type ('p, 'q) t := ('p, 'q) t
+       and type ('a, 'p, 'q, 'e) ops := ('a, 'p, 'q, 'e) ops
+       and type ('a, 'p, 'q, 'es) result := ('a, 'p, 'q, 'es) result
+       and type ('a, 'p, 'q, 'es) preemptible_result := ('a, 'p, 'q, 'es) result
   end
 
   (** The signature for effects with two type parameters *)
@@ -301,7 +280,6 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
     module Contended : sig
       include
         S2_base
-        [@mode portable nonportable]
         with type ('p, 'q) t := ('p, 'q) t
          and type ('a, 'p, 'q, 'e) ops := ('a, 'p, 'q, 'e) ops
     end
@@ -309,7 +287,6 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
     module Portable : sig
       include
         S2_base
-        [@mode portable portable]
         with type ('p, 'q) t := ('p, 'q) t
          and type ('a, 'p, 'q, 'e) ops := ('a, 'p, 'q, 'e) ops
     end

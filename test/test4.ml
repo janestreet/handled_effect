@@ -8,7 +8,7 @@ module Eff = Handled_effect.Make (struct
 
 open Eff
 
-let%expect_test "nested handlers" =
+let%expect_test ("nested handlers" [@tags "effects-enabled"]) =
   let r =
     let rec handle = function
       | Value v -> v

@@ -78,7 +78,7 @@ let handle comp =
   Format.printf "%d@." (handle (Eff1.run comp))
 ;;
 
-let%expect_test "basic effect handling" =
+let%expect_test ("basic effect handling" [@tags "effects-enabled"]) =
   handle comp1;
   handle comp2;
   handle comp3;
@@ -91,7 +91,7 @@ let%expect_test "basic effect handling" =
 ;;
 
 type 'a status =
-  | Complete of 'a @@ aliased global
+  | Complete of 'a @@ global
   | Suspended of
       { msg : int
       ; cont : (int, 'a, unit) Eff1.Continuation.t
@@ -103,7 +103,7 @@ let handle = function
   | Eff1.Operation (Xchg msg, cont) -> Suspended { msg; cont }
 ;;
 
-let step (f : local_ _ -> 'a) () : 'a status = handle (Eff1.run f)
+let step (f : _ @ local -> 'a) () : 'a status = handle (Eff1.run f)
 
 let rec run_both a b =
   match a (), b () with
@@ -115,14 +115,14 @@ let rec run_both a b =
 
 let comp2 h = Eff1.perform h (Xchg 21) * Eff1.perform h (Xchg 21)
 
-let%expect_test "bidirectional communication" =
+let%expect_test ("bidirectional communication" [@tags "effects-enabled"]) =
   let x, y = run_both (step comp1) (step comp2) in
   Format.printf ">> %d %d" x y;
   [%expect {| >> 42 0 |}]
 ;;
 
 type ('a, 't) op2 =
-  | Fork : (local_ 't Handler.t -> unit) -> (unit, 't) op2
+  | Fork : ('t Handler.t @ local -> unit) -> (unit, 't) op2
   | Yield : (unit, 't) op2
   | Xchg : int -> (int, 't) op2
 
@@ -178,7 +178,7 @@ let run main : unit =
   handle (Eff2.run main)
 ;;
 
-let%expect_test "concurrent scheduler" =
+let%expect_test ("concurrent scheduler" [@tags "effects-enabled"]) =
   run (fun h ->
     fork h (fun h ->
       Format.printf "[t1] Sending 0\n";
@@ -231,12 +231,12 @@ let baz () =
   handle (Eff4.run bar)
 ;;
 
-let%expect_test "nested effect handlers" =
+let%expect_test ("nested effect handlers" [@tags "effects-enabled"]) =
   Format.printf "%s" (baz ());
   [%expect {| Hello, world! Coucou! Hello, world! |}]
 ;;
 
-let%expect_test "discontinuation" =
+let%expect_test ("discontinuation" [@tags "effects-enabled"]) =
   Format.printf
     "%s"
     (let rec handle = function
@@ -251,7 +251,7 @@ let%expect_test "discontinuation" =
   [%expect {| Discontinued |}]
 ;;
 
-let%expect_test "one-shot continuations" =
+let%expect_test ("one-shot continuations" [@tags "effects-enabled"]) =
   try
     Format.printf "%d"
     @@
@@ -275,7 +275,7 @@ module Eff5 = Handled_effect.Make1 (struct
     type ('a, 'p) t = ('a, 'p) op5
   end)
 
-let invert (type a) ~(iter : local_ (a -> unit) -> unit) : a OnceSeq.t =
+let invert (type a) ~(iter : (a -> unit) @ local -> unit) : a OnceSeq.t =
   fun () ->
   let rec handle = function
     | Eff5.Value () -> OnceSeq.nil
@@ -291,7 +291,7 @@ let string_iter f s =
   done
 ;;
 
-let%expect_test "iterator" =
+let%expect_test ("iterator" [@tags "effects-enabled"]) =
   let s = invert ~iter:(fun yield -> string_iter yield "OCaml") in
   let next = OnceSeq.to_dispenser s in
   let rec loop () =
@@ -328,7 +328,7 @@ let run comp =
   handle_send (Eff6.run comp)
 ;;
 
-let%expect_test "send-receive protocol" =
+let%expect_test ("send-receive protocol" [@tags "effects-enabled"]) =
   run (fun h ->
     Format.printf "Send 42\n";
     Eff6.perform h (Send 42);

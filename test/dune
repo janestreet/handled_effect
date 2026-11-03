@@ -1,6 +1,6 @@
 (library
  (name handled_effect_test)
- (libraries basement capsule expect_test_helpers_base handled_effect threads
-   unique)
+ (libraries basement capsule expect_test_helpers_base handled_effect
+   portable.kernel unique)
  (preprocess
   (pps ppx_jane -compare-require-explicit-locality)))

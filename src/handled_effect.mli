@@ -1,4 +1,1 @@
-(** @inline *)
-include sig
-  include module type of Handled_effect_raises_in_jsoo (** @inline *)
-end
+include Handled_effect_intf.Handled_effect (** @inline *)

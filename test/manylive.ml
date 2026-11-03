@@ -16,7 +16,7 @@ let f x =
   [| a0; a1; a2; a3; a4; a5; a6; a7; a8; a9; a10; a11; a12 |]
 ;;
 
-let%expect_test "many live values" =
+let%expect_test ("many live values" [@tags "effects-enabled"]) =
   for _ = 1 to 50000 do
     let rs = Sys.opaque_identity f false in
     assert (Array.for_all (fun x -> !x = 1) rs);

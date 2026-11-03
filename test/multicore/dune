@@ -1,0 +1,5 @@
+(library
+ (name handled_effect_test_multicore)
+ (libraries basement handled_effect threads unique)
+ (preprocess
+  (pps ppx_jane -compare-require-explicit-locality)))

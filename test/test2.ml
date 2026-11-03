@@ -26,7 +26,7 @@ let rec handle = function
     v + 1
 ;;
 
-let%expect_test "performing effects" =
+let%expect_test ("performing effects" [@tags "effects-enabled"]) =
   let v = handle (Eff.run f) in
   printf "result=%d\n%!" v;
   [%expect

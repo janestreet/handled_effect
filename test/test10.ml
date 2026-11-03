@@ -35,7 +35,7 @@ let e i =
   Random.int i + handle (Eff1.run (fun h -> d h i))
 ;;
 
-let%expect_test "different effects" =
+let%expect_test ("different effects" [@tags "effects-enabled"]) =
   ignore (e 1 : int);
   print_string "ok\n";
   [%expect {| ok |}]
