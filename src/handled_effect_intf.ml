@@ -1,41 +1,51 @@
 open! Base
 
+module type Handler_list = sig
+  type 'e handler
+
+  type 'es t =
+    | [] : unit t
+    | ( :: ) : 'e handler * 'es t -> ('e * 'es) t
+    (** ['es t] is a typed list of [Handler.t]s *)
+
+  module Length : sig
+    type x = X
+
+    type 'es t =
+      | [] : unit t
+      | ( :: ) : x * 'es t -> ('e * 'es) t
+      (** ['es t] represents the length of a typed list of [Handler.t]s. It has slightly
+          unusual constructors so that lengths can be written as [[X; X; X]] rather than
+          e.g. [(S (S (S Z)))]. *)
+  end
+
+  (** [length hs] is the length of [hs] *)
+  val length : 'es t @ local -> 'es Length.t
+end
+
 module type Handler = sig
   (** ['e t] is an effect handler for the effect ['e] on the current stack. *)
   type 'e t
 
-  module List : sig
-    type 'e handler := 'e t
-
-    type 'es t =
-      | [] : unit t
-      | ( :: ) : 'e handler * 'es t -> ('e * 'es) t
-      (** ['es t] is a typed list of [Handler.t]s *)
-
-    module Length : sig
-      type x = X
-
-      type 'es t =
-        | [] : unit t
-        | ( :: ) : x * 'es t -> ('e * 'es) t
-        (** ['es t] represents the length of a typed list of [Handler.t]s. It has slightly
-            unusual constructors so that lengths can be written as [[X; X; X]] rather than
-            e.g. [(S (S (S Z)))]. *)
-    end
-
-    (** [length hs] is the length of [hs] *)
-    val length : 'es t @ local -> 'es Length.t
-  end
+  module List : Handler_list with type 'e handler := 'e t
 end
 
 module type Continuation = sig
-  (** [('a, 'b, 'es) continuation] is a delimited continuation that expects an ['a] value
-      and returns a ['b] value. It requires handlers for the effects ['es]. *)
+  (** [('a, 'b, 'es) Continuation.t] is a delimited continuation that expects an ['a]
+      value and returns a ['b] value. It requires handlers for the effects ['es]. *)
   type (-'a, +'b, 'es) t : value mod contended many
 
   (** [get_callstack c n] returns a description of the top of the call stack on the
       continuation [c], with at most [n] entries. *)
   val get_callstack : ('a, 'b, 'es) t @ local -> int -> Backtrace.t
+
+  module Preemptible : sig
+    type (-'a, +'b, 'es) t : value mod contended many
+    [@@ocaml.doc
+      {| [('a, 'b, 'es) Continuation.Preemptible.t] is a delimited {i preemptible}
+          continuation that expects an ['a] value and returns a ['b] value. It requires
+          handlers for the effects ['es]. |}]
+  end
 end
 
 module Definitions (Handler : Handler) (Continuation : Continuation) = struct
@@ -46,7 +56,8 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
   module type%template
     [@mode
       (p_arg, c_arg) = ((nonportable, uncontended), (portable, contended))
-      , (p_res, c_res) = ((nonportable, uncontended), (portable, contended))] S2_generic = sig
+      , (p_res, c_res) = ((nonportable, uncontended), (portable, contended))]
+    S2_generic = sig
     @@ portable
     (** [('p, 'q) t] represents the effect. It only appears as the argument to
         [Handler.t]. *)
@@ -57,9 +68,14 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
         [('p, 'q) t] to tie the knot on recursive operations. *)
     type ('a, 'p, 'q, 'e) ops
 
-    (** [('a, 'p, 'q, 'es) t] is the result of running a continuation until it either
+    (** [('a, 'p, 'q, 'es) result] is the result of running a continuation until it either
         finishes and returns an ['a] value, raises an exception, or performs an operation. *)
     type ('a, 'p, 'q, 'es) result
+
+    (** [('a, 'p, 'q, 'es) preemptible_result] is the result of running a continuation
+        until it finishes and returns an ['a] value, raises an exception, performs an
+        operation, or is preempted. *)
+    type ('a, 'p, 'q, 'es) preemptible_result
 
     (** [fiber f] constructs a continuation that runs the computation [f]. [f] is passed a
         [t Handler.t] so that it can perform operations from the effect [t]. *)
@@ -103,6 +119,81 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
       ('p, 'q) t Handler.t @ c_arg local
       -> ('a, 'p, 'q, ('p, 'q) t) ops @ p_arg
       -> 'a @ c_arg once unique
+
+    module Preemptible : sig
+      type ('a, 'p, 'q, 'es) result := ('a, 'p, 'q, 'es) preemptible_result
+      [@@ocaml.doc
+        {| [('a, 'p, 'q, 'es) result] is the result of running a continuation until it
+            finishes and returns an ['a] value, raises an exception, performs an
+            operation, or is preempted. |}]
+
+      val fiber
+        : ('a : value mod p_arg) 'b 'p 'q.
+        (('p, 'q) t Handler.t @ c_res local p_arg -> 'a @ c_arg once unique -> 'b)
+        @ once p_res
+        -> ('a, ('b, 'p, 'q, unit) result, unit) Continuation.Preemptible.t @ p_res unique
+      [@@ocaml.doc
+        {| [Preemptible.fiber f] constructs a preemptible continuation that runs the
+            computation [f]. [f] is passed a [t Handler.t] so that it can perform
+            operations from the effect [t]. |}]
+      [@@alert
+        do_not_nest
+          "The nesting semantics for preemptible fibers are currently incorrect; nest \
+           preemptible effect handlers with caution!"]
+
+      val fiber_with
+        : ('a : value mod p_arg) 'b 'p 'q 'es.
+        'es Handler.List.Length.t @ local
+        -> ((('p, 'q) t * 'es) Handler.List.t @ c_res local p_arg
+            -> 'a @ c_arg once unique
+            -> 'b)
+           @ once p_res
+        -> ('a, ('b, 'p, 'q, 'es) result, 'es) Continuation.Preemptible.t @ p_res unique
+      [@@ocaml.doc
+        {| [Preemptible.fiber_with l f] constructs a preemptible continuation that runs
+            the computation [f] and requires handlers for [l] additional effects. [f] is
+            passed a typed list of handlers so that it can perform operations from the
+            effect [t] and the effects ['es]. |}]
+      [@@alert
+        do_not_nest
+          "The nesting semantics for preemptible fibers are currently incorrect; nest \
+           preemptible effect handlers with caution!"]
+
+      val run
+        :  on_tick:(unit -> Tick_outcome.t) @ portable
+        -> (('p, 'q) t Handler.t @ c_res local p_arg -> 'a) @ once p_res
+        -> ('a, 'p, 'q, unit) result @ once unique
+      [@@ocaml.doc
+        {| [Preemptible.run ~on_tick f] constructs a preemptible continuation that runs
+            the computation [f] and immediately resumes it.
+
+            When a tick occurs (scheduled via [Domain.Tick.acquire]), [on_tick] (which
+            must be safe to be called from a signal handler) is called. If it returns
+            [Preempt], the fiber will be preempted. |}]
+      [@@alert
+        do_not_nest
+          "The nesting semantics for preemptible fibers are currently incorrect; nest \
+           preemptible effect handlers with caution!"]
+
+      val run_with
+        :  on_tick:(unit -> Tick_outcome.t) @ portable
+        -> 'es Handler.List.t @ c_res local p_arg
+        -> ((('p, 'q) t * 'es) Handler.List.t @ c_res local p_arg -> 'a) @ once p_res
+        -> ('a, 'p, 'q, 'es) result @ once unique
+      [@@ocaml.doc
+        {| [Preemptible.run_with ~on_tick hs f] constructs a preemptible continuation
+            that runs the computation [f] under the handlers [hs] and immediately resumes
+            it. [f] is passed a typed list of handlers so that it can perform operations
+            from the effect [t] and the effects ['es].
+
+            When a tick occurs (scheduled via [Domain.Tick.acquire]), [on_tick] (which
+            must be safe to be called from a signal handler) is called. If it returns
+            [Preempt], the fiber will be preempted. |}]
+      [@@alert
+        do_not_nest
+          "The nesting semantics for preemptible fibers are currently incorrect; nest \
+           preemptible effect handlers with caution!"]
+    end
   end
 
   (** The signature for effects with no type parameters at a combination of modes.
@@ -111,7 +202,8 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
   module type%template
     [@mode
       (p_arg, c_arg) = ((nonportable, uncontended), (portable, contended))
-      , (p_res, c_res) = ((nonportable, uncontended), (portable, contended))] S_base = sig
+      , (p_res, c_res) = ((nonportable, uncontended), (portable, contended))]
+    S_base = sig
     type t
     type ('a, 'e) ops
 
@@ -125,13 +217,6 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
       (** [('a, 'es) t] is the result of running a continuation until it either finishes
           and returns an ['a] value, raises an exception, or performs an operation. *)
 
-    include
-      S2_generic
-      [@mode p_arg p_res]
-      with type (_, _) t := t
-       and type ('a, _, _, 'e) ops := ('a, 'e) ops
-       and type ('a, _, _, 'es) result := ('a, 'es) result
-
     module Result : sig @@ portable
       type eff := t
 
@@ -142,7 +227,32 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
             ('o, eff) ops @@ c_arg global many
             * ('o, ('a, 'es) result, 'es) Continuation.t @@ p_res
             -> ('a, 'es) t
+
+      module Preemptible : sig @@ portable
+        type ('a, 'es) t =
+          | Value : 'a @@ global many -> ('a, 'es) t
+          | Exception : exn @@ global many -> ('a, 'es) t
+          | Operation :
+              ('o, eff) ops @@ c_arg global many
+              * ('o, ('a, 'es) t, 'es) Continuation.Preemptible.t @@ p_res
+              -> ('a, 'es) t
+          | Preemption :
+              (unit, ('a, 'es) t, 'es) Continuation.Preemptible.t @@ p_res
+              -> ('a, 'es) t
+        [@@ocaml.doc
+          {| [('a, 'es) t] is the result of running a preemptible continuation until it
+              finishes and returns an ['a] value, raises an exception, performs an
+              operation, or is preempted. |}]
+      end
     end
+
+    include
+      S2_generic
+      [@mode p_arg p_res]
+      with type (_, _) t := t
+       and type ('a, _, _, 'e) ops := ('a, 'e) ops
+       and type ('a, _, _, 'es) result := ('a, 'es) result
+       and type ('a, _, _, 'es) preemptible_result := ('a, 'es) Result.Preemptible.t
   end
 
   (** The signature for effects with no type parameters *)
@@ -178,6 +288,11 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
 
     module Continuation : sig
       type ('a, 'b, 'es) t = ('a, ('b, 'es) result, 'es) Continuation.t
+
+      module Preemptible : sig
+        type ('a, 'b, 'es) t =
+          ('a, ('b, 'es) Result.Preemptible.t, 'es) Continuation.Preemptible.t
+      end
     end
   end
 
@@ -187,7 +302,8 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
   module type%template
     [@mode
       (p_arg, c_arg) = ((nonportable, uncontended), (portable, contended))
-      , (p_res, c_res) = ((nonportable, uncontended), (portable, contended))] S1_base = sig
+      , (p_res, c_res) = ((nonportable, uncontended), (portable, contended))]
+    S1_base = sig
     type 'p t
     type ('a, 'p, 'e) ops
 
@@ -202,13 +318,6 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
           finishes and returns an ['a] value, raises an exception, or performs an
           operation. *)
 
-    include
-      S2_generic
-      [@mode p_arg p_res]
-      with type ('p, _) t := 'p t
-       and type ('a, 'p, _, 'e) ops := ('a, 'p, 'e) ops
-       and type ('a, 'p, _, 'e) result := ('a, 'p, 'e) result
-
     module Result : sig @@ portable
       type 'p eff := 'p t
 
@@ -219,7 +328,32 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
             ('o, 'p, 'p eff) ops @@ c_arg global many
             * ('o, ('a, 'p, 'es) result, 'es) Continuation.t @@ p_res
             -> ('a, 'p, 'es) t
+
+      module Preemptible : sig
+        type ('a, 'p, 'es) t =
+          | Value : 'a @@ global many -> ('a, 'p, 'es) t
+          | Exception : exn @@ global many -> ('a, 'p, 'es) t
+          | Operation :
+              ('o, 'p, 'p eff) ops @@ c_arg global many
+              * ('o, ('a, 'p, 'es) t, 'es) Continuation.Preemptible.t @@ p_res
+              -> ('a, 'p, 'es) t
+          | Preemption :
+              (unit, ('a, 'p, 'es) t, 'es) Continuation.Preemptible.t @@ p_res
+              -> ('a, 'p, 'es) t
+        [@@ocaml.doc
+          {| [('a, 'p, 'es) t] is the result of running a preemptible continuation until
+              it finishes and returns an ['a] value, raises an exception, performs an
+              operation, or is preempted. |}]
+      end
     end
+
+    include
+      S2_generic
+      [@mode p_arg p_res]
+      with type ('p, _) t := 'p t
+       and type ('a, 'p, _, 'e) ops := ('a, 'p, 'e) ops
+       and type ('a, 'p, _, 'e) result := ('a, 'p, 'e) result
+       and type ('a, 'p, _, 'e) preemptible_result := ('a, 'p, 'e) Result.Preemptible.t
   end
 
   (** The signature for effects with one type parameter *)
@@ -255,6 +389,11 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
 
     module Continuation : sig
       type ('a, 'b, 'p, 'es) t = ('a, ('b, 'p, 'es) result, 'es) Continuation.t
+
+      module Preemptible : sig
+        type ('a, 'b, 'p, 'es) t =
+          ('a, ('b, 'p, 'es) Result.Preemptible.t, 'es) Continuation.Preemptible.t
+      end
     end
   end
 
@@ -264,7 +403,8 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
   module type%template
     [@mode
       (p_arg, c_arg) = ((nonportable, uncontended), (portable, contended))
-      , (p_res, c_res) = ((nonportable, uncontended), (portable, contended))] S2_base = sig
+      , (p_res, c_res) = ((nonportable, uncontended), (portable, contended))]
+    S2_base = sig
     type ('p, 'q) t
     type ('a, 'p, 'q, 'e) ops
 
@@ -279,13 +419,6 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
           finishes and returns an ['a] value, raises an exception, or performs an
           operation. *)
 
-    include
-      S2_generic
-      [@mode p_arg p_res]
-      with type ('p, 'q) t := ('p, 'q) t
-       and type ('a, 'p, 'q, 'e) ops := ('a, 'p, 'q, 'e) ops
-       and type ('a, 'p, 'q, 'es) result := ('a, 'p, 'q, 'es) result
-
     module Result : sig @@ portable
       type ('p, 'q) eff := ('p, 'q) t
 
@@ -296,7 +429,33 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
             ('o, 'p, 'q, ('p, 'q) eff) ops @@ c_arg global many
             * ('o, ('a, 'p, 'q, 'es) result, 'es) Continuation.t @@ p_res
             -> ('a, 'p, 'q, 'es) t
+
+      module Preemptible : sig
+        type ('a, 'p, 'q, 'es) t =
+          | Value : 'a @@ global many -> ('a, 'p, 'q, 'es) t
+          | Exception : exn @@ global many -> ('a, 'p, 'q, 'es) t
+          | Operation :
+              ('o, 'p, 'q, ('p, 'q) eff) ops @@ c_arg global many
+              * ('o, ('a, 'p, 'q, 'es) t, 'es) Continuation.Preemptible.t @@ p_res
+              -> ('a, 'p, 'q, 'es) t
+          | Preemption :
+              (unit, ('a, 'p, 'q, 'es) t, 'es) Continuation.Preemptible.t @@ p_res
+              -> ('a, 'p, 'q, 'es) t
+        [@@ocaml.doc
+          {| [('a, 'p, 'q, 'es) t] is the result of running a preemptible continuation
+              until it finishes and returns an ['a] value, raises an exception, performs
+              an operation, or is preempted. |}]
+      end
     end
+
+    include
+      S2_generic
+      [@mode p_arg p_res]
+      with type ('p, 'q) t := ('p, 'q) t
+       and type ('a, 'p, 'q, 'e) ops := ('a, 'p, 'q, 'e) ops
+       and type ('a, 'p, 'q, 'es) result := ('a, 'p, 'q, 'es) result
+       and type ('a, 'p, 'q, 'es) preemptible_result :=
+        ('a, 'p, 'q, 'es) Result.Preemptible.t
   end
 
   (** The signature for effects with two type parameters *)
@@ -335,6 +494,11 @@ module Definitions (Handler : Handler) (Continuation : Continuation) = struct
 
     module Continuation : sig
       type ('a, 'b, 'p, 'q, 'es) t = ('a, ('b, 'p, 'q, 'es) result, 'es) Continuation.t
+
+      module Preemptible : sig
+        type ('a, 'b, 'p, 'q, 'es) t =
+          ('a, ('b, 'p, 'q, 'es) Result.Preemptible.t, 'es) Continuation.Preemptible.t
+      end
     end
   end
 
@@ -414,4 +578,27 @@ module type Handled_effect = sig @@ portable
 
       Only achievable with [Obj.magic_unique] or similar escape hatches. *)
   exception Continuation_already_resumed
+
+  module Preemptible : sig
+    module Tick_outcome = Tick_outcome
+
+    val continue
+      :  on_tick:(unit -> Tick_outcome.t) @ portable
+      -> ('a, 'b, 'es) Continuation.Preemptible.t @ unique
+      -> 'a @ once unique
+      -> 'es Handler.List.t @ local
+      -> 'b @ once unique
+    [@@ocaml.doc
+      {| [continue ~on_tick k v hs] resumes the preemptible continuation [k] with value
+          [v]. [hs] are used to handle [k]'s additional effects.
+
+          When a tick occurs (scheduled via [Domain.Tick.acquire]), [on_tick] (which must
+          be safe to be called from a signal handler) is called. If it returns [Preempt],
+          the fiber will be preempted again. |}]
+
+    [@@@ocaml.text
+      {| Note that preemptible continuations represent a computation that has been
+          interrupted at an {i arbitrary poll point}, and hence cannot (yet) be
+          discontinued |}]
+  end
 end

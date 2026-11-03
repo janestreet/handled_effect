@@ -34,7 +34,7 @@ let handle_print (* local_ *) hs f =
   handle (Eff2.run_with hs f) [@nontail]
 ;;
 
-let%expect_test "shallow state with IO" =
+let%expect_test ("shallow state with IO" [@tags "effects-enabled"]) =
   let (), i =
     handle_print [] (fun hs ->
       handle_state hs 0 (fun [ h1; h2 ] ->

@@ -4,7 +4,7 @@ module Eff = Handled_effect.Make (struct
     type 'a t = 'a op
   end)
 
-let%expect_test "continuation comparison and hashing" =
+let%expect_test ("continuation comparison and hashing" [@tags "effects-enabled"]) =
   let handle = function
     | Eff.Value x -> x
     | Eff.Exception e -> raise e

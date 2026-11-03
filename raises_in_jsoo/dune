@@ -1,6 +1,0 @@
-(library
- (name handled_effect_raises_in_jsoo)
- (public_name handled_effect.raises_in_jsoo)
- (libraries base basement)
- (preprocess
-  (pps ppx_template)))

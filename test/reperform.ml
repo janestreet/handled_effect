@@ -29,7 +29,7 @@ let rec nest h n =
       nest h (n - 1)))
 ;;
 
-let%expect_test "reperforming effects - success case" =
+let%expect_test ("reperforming effects - success case" [@tags "effects-enabled"]) =
   let rec handle = function
     | Eff1.Value v -> Printf.printf "= %d\n" v
     | Eff1.Exception e -> raise e
@@ -52,7 +52,32 @@ let%expect_test "reperforming effects - success case" =
     |}]
 ;;
 
-let%expect_test "reperforming effects - exception case" =
+let%expect_test ("reperforming effects is tail-recursive" [@tags "effects-enabled"]) =
+  let num_operations = 100_000 in
+  let rec perform_all h = function
+    | 0 -> ()
+    | n ->
+      let (_ : int) = Eff1.perform h (E n) in
+      perform_all h (n - 1)
+  in
+  let run_inner h =
+    let handle = function
+      | Eff2.Value () -> ()
+      | Eff2.Exception e -> raise e
+      | Eff2.Operation (F, _) -> assert false
+    in
+    handle (Eff2.run_with [ h ] (fun [ _; h ] -> perform_all h num_operations))
+  in
+  let rec handle = function
+    | Eff1.Value () -> print_endline "ok"
+    | Eff1.Exception e -> raise e
+    | Eff1.Operation (E n, k) -> handle (Handled_effect.continue k n [])
+  in
+  handle (Eff1.run run_inner);
+  [%expect {| ok |}]
+;;
+
+let%expect_test ("reperforming effects - exception case" [@tags "effects-enabled"]) =
   let rec handle = function
     | Eff1.Value _ -> assert false
     | Eff1.Exception e -> Printf.printf "%s\n" (Printexc.to_string e)

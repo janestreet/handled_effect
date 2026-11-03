@@ -26,7 +26,7 @@ let comp h () =
   perform h (Set 43)
 ;;
 
-let%expect_test "shallow state handling" =
+let%expect_test ("shallow state handling" [@tags "effects-enabled"]) =
   let (), i = handle_state 0 comp () in
   Printf.printf "Final state: %d" i;
   [%expect

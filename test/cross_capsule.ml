@@ -19,7 +19,7 @@ let rec handle = function
     handle (Handled_effect.continue k n [])
 ;;
 
-let%expect_test "cross capsule data sharing" =
+let%expect_test ("cross capsule data sharing" [@tags "effects-enabled"]) =
   handle
     (Eff.Contended.run (fun h ->
        let (P k) = Capsule.Prim.create () in

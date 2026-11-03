@@ -15,7 +15,9 @@ and handle = function
   | Exception e -> raise e
 ;;
 
-let%expect_test "evenodd" =
+let%expect_test ("evenodd"
+  [@tags (* Javscript with CPS stack overflows on this test *) "no-js", "effects-enabled"])
+  =
   let n = 100_000 in
   Printf.printf "even %d is %B\n%!" n (even n);
   [%expect {| even 100000 is true |}]

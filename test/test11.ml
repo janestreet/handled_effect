@@ -20,7 +20,7 @@ let handle comp =
   handle (Eff.run comp)
 ;;
 
-let%expect_test "[RESUMETERM] with [extra_args != 0]" =
+let%expect_test ("[RESUMETERM] with [extra_args != 0]" [@tags "effects-enabled"]) =
   handle
     (fun h ->
       Printf.printf "%d\n" (perform h E);

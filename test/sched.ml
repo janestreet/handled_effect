@@ -1,22 +1,6 @@
-module Uniqueue : sig
-  type 'a t
-
-  val create : unit -> 'a t
-  val push : 'a @ once unique -> 'a t -> unit
-  val pop : 'a t -> 'a @ once unique
-  val is_empty : 'a t -> bool
-end = struct
-  type 'a t = 'a Unique.Once.t Queue.t
-
-  let create () = Queue.create ()
-  let push v t = Queue.push (Unique.Once.make v) t
-  let pop t = Unique.Once.take_exn (Queue.pop t)
-  let is_empty t = Queue.is_empty t
-end
-
 type ('a, 'e) op =
   | Yield : (unit, 'e) op
-  | Fork : (local_ 'e Handled_effect.Handler.t -> string) -> (unit, 'e) op
+  | Fork : ('e Handled_effect.Handler.t @ local -> string) -> (unit, 'e) op
   | Ping : (unit, 'e) op
 
 module Eff = Handled_effect.Make_rec (struct
@@ -96,7 +80,7 @@ let test h =
   "ok"
 ;;
 
-let%expect_test "scheduler test" =
+let%expect_test ("scheduler test" [@tags "effects-enabled"]) =
   let `Finished = run test in
   [%expect {| A+,+B.C,D,[]!E. |}]
 ;;

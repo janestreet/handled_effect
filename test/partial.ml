@@ -20,7 +20,7 @@ let f _ =
   fun h2 -> Eff.perform h2 E
 ;;
 
-let%expect_test "partial effect handling" =
+let%expect_test ("partial effect handling" [@tags "effects-enabled"]) =
   let rec handle = function
     | Eff.Value _ -> assert false
     | Eff.Exception Done -> print_string "ok"

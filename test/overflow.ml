@@ -43,7 +43,7 @@ let f a b c d e f g h =
   + hhh
 ;;
 
-let%expect_test "no stack overflow" =
+let%expect_test ("no stack overflow" [@tags "effects-enabled"]) =
   let handle = function
     | Eff.Value n -> Printf.printf "%d\n" n
     | Eff.Exception e -> raise e
